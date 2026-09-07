@@ -1,0 +1,118 @@
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.app.core.database import Base
+
+
+class IncidentRecord(Base):
+    __tablename__ = "incidents"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    incident_id: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    service: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    namespace: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    environment: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    recent_log: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    lifecycle_state: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="DETECTED",
+    )
+
+    previous_lifecycle_state: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    lifecycle_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    severity: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    root_cause: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    confidence: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    remediation_action: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    remediation_risk: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    requires_approval: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+
+    approval_status: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    recovery_status: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
