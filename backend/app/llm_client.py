@@ -26,24 +26,43 @@ Do not use Markdown.
 Do not use code fences.
 Do not add explanations outside the JSON object.
 
-Your response MUST follow this structure:
+Your response MUST follow the supplied JSON schema.
+
+IMPORTANT REMEDIATION RULE:
+
+The remediation.action field MUST contain exactly ONE of these
+machine-readable action identifiers:
+
+1. "restart_deployment"
+2. "rollback_deployment"
+3. "scale_deployment"
+
+NEVER put a sentence, explanation, recommendation, or natural-language
+description inside remediation.action.
+
+For example, this is VALID:
 
 {
-  "severity": "low|medium|high|critical",
-  "root_cause": "string",
-  "confidence": 0.0,
-  "evidence": [
-    "string"
-  ],
-  "next_checks": [
-    "string"
-  ],
   "remediation": {
-    "action": "string",
-    "risk": "low|medium|high|critical",
+    "action": "restart_deployment",
+    "risk": "medium",
     "requires_approval": true
   }
 }
+
+This is INVALID:
+
+{
+  "remediation": {
+    "action": "Investigate database connectivity issues and update the configuration.",
+    "risk": "medium",
+    "requires_approval": true
+  }
+}
+
+If you believe that none of the supported remediation actions is
+appropriate, choose the safest supported action based only on the
+available evidence and explain the limitation in next_checks.
 
 Rules:
 
@@ -55,6 +74,8 @@ Rules:
 6. Never claim that a remediation was executed.
 7. You are proposing an action, not executing it.
 8. Distinguish observed facts from hypotheses.
+9. remediation.action must always be one of the supported machine-readable
+   identifiers defined above.
 """
 
 
@@ -65,8 +86,8 @@ def ask_gemma(
     """
     Send an incident and structured investigation evidence to Gemma.
 
-    The returned response is validated directly against the
-    IncidentAnalysis Pydantic schema.
+    Gemma is constrained by the JSON schema generated from the
+    IncidentAnalysis Pydantic model.
     """
 
     incident_json = incident.model_dump_json(indent=2)
@@ -80,6 +101,16 @@ INCIDENT:
 
 INVESTIGATION EVIDENCE:
 {evidence_json}
+
+Remember:
+
+remediation.action MUST be exactly one of:
+
+- restart_deployment
+- rollback_deployment
+- scale_deployment
+
+Do not write a sentence in remediation.action.
 """
 
     payload = {
@@ -94,7 +125,7 @@ INVESTIGATION EVIDENCE:
                 "content": user_prompt,
             },
         ],
-        "format": "json",
+        "format": IncidentAnalysis.model_json_schema(),
         "stream": False,
         "options": {
             "temperature": 0.1,
@@ -189,10 +220,18 @@ def main():
     print("=" * 60)
 
     print("\nIncident:")
-    print(incident.model_dump_json(indent=2))
+    print(
+        incident.model_dump_json(
+            indent=2
+        )
+    )
 
     print("\nEvidence:")
-    print(evidence.model_dump_json(indent=2))
+    print(
+        evidence.model_dump_json(
+            indent=2
+        )
+    )
 
     print(
         "\nNote: This direct client test uses empty evidence."
