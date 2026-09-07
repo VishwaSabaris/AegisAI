@@ -3,6 +3,7 @@ import time
 import urllib.error
 import urllib.request
 
+from backend.app.models.evidence import InvestigationEvidence
 from backend.app.models.incident import (
     Incident,
     IncidentAnalysis,
@@ -17,7 +18,7 @@ SYSTEM_PROMPT = """
 You are AegisAI, an AI DevOps incident investigation assistant.
 
 Analyze infrastructure and application incidents using ONLY the
-evidence provided by the user.
+incident information and investigation evidence provided.
 
 Return valid JSON only.
 
@@ -47,27 +48,38 @@ Your response MUST follow this structure:
 Rules:
 
 1. confidence must be between 0 and 1.
-2. Evidence must come only from the incident information provided.
+2. Evidence must come only from the incident and investigation evidence.
 3. Never invent logs, metrics, events, configuration, or infrastructure state.
 4. If information is missing, identify what needs to be checked.
 5. Infrastructure-changing actions should normally require approval.
 6. Never claim that a remediation was executed.
 7. You are proposing an action, not executing it.
+8. Distinguish observed facts from hypotheses.
 """
 
 
-def ask_gemma(incident: Incident) -> IncidentAnalysis:
+def ask_gemma(
+    incident: Incident,
+    evidence: InvestigationEvidence,
+) -> IncidentAnalysis:
     """
-    Send a validated Incident to Gemma and return a validated
-    IncidentAnalysis.
+    Send an incident and structured investigation evidence to Gemma.
+
+    The returned response is validated directly against the
+    IncidentAnalysis Pydantic schema.
     """
 
     incident_json = incident.model_dump_json(indent=2)
+    evidence_json = evidence.model_dump_json(indent=2)
 
     user_prompt = f"""
-Analyze the following DevOps incident:
+Analyze the following DevOps incident.
 
+INCIDENT:
 {incident_json}
+
+INVESTIGATION EVIDENCE:
+{evidence_json}
 """
 
     payload = {
@@ -103,13 +115,16 @@ Analyze the following DevOps incident:
     start_time = time.perf_counter()
 
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=120,
+        ) as response:
             response_data = response.read().decode("utf-8")
 
     except urllib.error.URLError as error:
         raise RuntimeError(
             f"Could not connect to Ollama at {OLLAMA_URL}.\n"
-            f"Make sure the Ollama service is running.\n"
+            "Make sure the Ollama service is running.\n"
             f"Error: {error}"
         ) from error
 
@@ -117,18 +132,28 @@ Analyze the following DevOps incident:
 
     try:
         ollama_response = json.loads(response_data)
+
     except json.JSONDecodeError as error:
         raise RuntimeError(
             "Ollama returned an invalid HTTP response."
         ) from error
 
-    raw_content = ollama_response.get("message", {}).get("content", "")
+    raw_content = (
+        ollama_response
+        .get("message", {})
+        .get("content", "")
+    )
 
     if not raw_content:
-        raise RuntimeError("Gemma returned an empty response.")
+        raise RuntimeError(
+            "Gemma returned an empty response."
+        )
 
     try:
-        analysis = IncidentAnalysis.model_validate_json(raw_content)
+        analysis = IncidentAnalysis.model_validate_json(
+            raw_content
+        )
+
     except Exception as error:
         raise RuntimeError(
             "Gemma returned JSON that does not match the "
@@ -136,7 +161,9 @@ Analyze the following DevOps incident:
             f"Gemma response:\n{raw_content}"
         ) from error
 
-    print(f"\nInference time: {elapsed:.2f} seconds")
+    print(
+        f"\nInference time: {elapsed:.2f} seconds"
+    )
 
     return analysis
 
@@ -146,35 +173,29 @@ def main():
         service="payment-service",
         environment="Kubernetes",
         status="CrashLoopBackOff",
-        recent_log="Database connection refused on port 5432",
+        recent_log=(
+            "Database connection refused on port 5432"
+        ),
+    )
+
+    evidence = InvestigationEvidence(
+        pod_status=None,
+        pod_logs=None,
+        kubernetes_events=None,
     )
 
     print("=" * 60)
-    print("AegisAI - Gemma + Pydantic")
+    print("AegisAI - Gemma + Structured Evidence")
     print("=" * 60)
 
     print("\nIncident:")
     print(incident.model_dump_json(indent=2))
 
-    print("\nSending incident to local Gemma...")
+    print("\nEvidence:")
+    print(evidence.model_dump_json(indent=2))
 
-    analysis = ask_gemma(incident)
-
-    print("\nValidated Incident Analysis:")
-    print("-" * 60)
-    print(analysis.model_dump_json(indent=2))
-    print("-" * 60)
-
-    print("\nValidated Python objects:")
-    print(f"Severity: {analysis.severity}")
-    print(f"Confidence: {analysis.confidence}")
-    print(f"Root cause: {analysis.root_cause}")
-    print(f"Evidence count: {len(analysis.evidence)}")
-    print(f"Next checks: {len(analysis.next_checks)}")
-    print(f"Remediation risk: {analysis.remediation.risk}")
     print(
-        f"Requires approval: "
-        f"{analysis.remediation.requires_approval}"
+        "\nNote: This direct client test uses empty evidence."
     )
 
 
