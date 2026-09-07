@@ -6,6 +6,7 @@ from backend.app.models.orchestration import (
 )
 from backend.app.models.remediation import (
     RemediationAction,
+    RemediationApproval,
     RemediationRequest,
 )
 
@@ -14,10 +15,16 @@ class IncidentOrchestrator:
     """
     Coordinates the AegisAI incident lifecycle.
 
-    The orchestrator is responsible for workflow control.
+    The orchestrator controls the boundary between:
+    investigation,
+    AI analysis,
+    remediation evaluation,
+    human approval,
+    remediation execution,
+    and recovery verification.
 
-    It does not allow the LLM to directly execute
-    infrastructure-changing operations.
+    Infrastructure-changing actions are never executed
+    without explicit human approval.
     """
 
     def __init__(self) -> None:
@@ -36,8 +43,8 @@ class IncidentOrchestrator:
         """
         Validate the remediation action proposed by the LLM.
 
-        Only actions explicitly supported by AegisAI are allowed
-        to cross into the remediation layer.
+        Only explicitly supported actions may cross into
+        the remediation layer.
         """
 
         supported_actions = {
@@ -55,6 +62,23 @@ class IncidentOrchestrator:
             )
 
         return action  # type: ignore[return-value]
+
+    def _build_remediation_request(
+        self,
+        incident: Incident,
+        action: RemediationAction,
+        reason: str,
+    ) -> RemediationRequest:
+        """
+        Build a validated remediation request.
+        """
+
+        return RemediationRequest(
+            action=action,
+            service=incident.service,
+            namespace=incident.namespace,
+            reason=reason,
+        )
 
     def process_incident(
         self,
@@ -79,15 +103,16 @@ class IncidentOrchestrator:
             )
         )
 
-        remediation_request = RemediationRequest(
-            action=remediation_action,
-            service=incident.service,
-            namespace=incident.namespace,
-            reason=(
-                f"Gemma proposed remediation for "
-                f"{incident.service}: "
-                f"{analysis.root_cause}"
-            ),
+        remediation_request = (
+            self._build_remediation_request(
+                incident=incident,
+                action=remediation_action,
+                reason=(
+                    f"Gemma proposed remediation for "
+                    f"{incident.service}: "
+                    f"{analysis.root_cause}"
+                ),
+            )
         )
 
         risk_decision = (
@@ -107,3 +132,142 @@ class IncidentOrchestrator:
             remediation_executed=False,
             recovery_status=None,
         )
+
+    def approve_and_execute(
+        self,
+        incident: Incident,
+        approval: RemediationApproval,
+    ) -> dict:
+        """
+        Execute a previously evaluated remediation request
+        only after explicit human approval.
+
+        Rejected approvals never reach the Kubernetes
+        remediation tool.
+        """
+
+        if not approval.approved:
+            return {
+                "success": False,
+                "status": "REJECTED",
+                "service": incident.service,
+                "namespace": incident.namespace,
+                "remediation_executed": False,
+                "recovery_status": None,
+                "error": (
+                    "Remediation rejected by human approval."
+                ),
+            }
+
+        workflow = self.process_incident(
+            incident
+        )
+
+        if workflow.risk_decision is None:
+            return {
+                "success": False,
+                "status": "BLOCKED",
+                "service": incident.service,
+                "namespace": incident.namespace,
+                "remediation_executed": False,
+                "recovery_status": None,
+                "error": (
+                    "No risk decision was generated."
+                ),
+            }
+
+        if not workflow.approval_required:
+            return {
+                "success": False,
+                "status": "BLOCKED",
+                "service": incident.service,
+                "namespace": incident.namespace,
+                "remediation_executed": False,
+                "recovery_status": None,
+                "error": (
+                    "Remediation execution policy is invalid: "
+                    "approval was expected for an "
+                    "infrastructure-changing action."
+                ),
+            }
+
+        request = RemediationRequest(
+            action=workflow.risk_decision.action,
+            service=incident.service,
+            namespace=incident.namespace,
+            reason=(
+                f"Approved remediation for "
+                f"{incident.service}: "
+                f"{workflow.analysis.root_cause}"
+            ),
+        )
+
+        execution = self.remediation_agent.execute(
+            request=request,
+            approved=True,
+        )
+
+        if not execution["success"]:
+            return {
+                "success": False,
+                "status": "EXECUTION_FAILED",
+                "service": incident.service,
+                "namespace": incident.namespace,
+                "remediation_executed": False,
+                "recovery_status": None,
+                "execution": execution,
+                "error": execution.get(
+                    "error",
+                    "Remediation execution failed.",
+                ),
+            }
+
+        verification = (
+            self.remediation_agent.verify(
+                service=incident.service,
+                namespace=incident.namespace,
+            )
+        )
+
+        if not verification["success"]:
+            return {
+                "success": False,
+                "status": "VERIFICATION_FAILED",
+                "service": incident.service,
+                "namespace": incident.namespace,
+                "remediation_executed": True,
+                "recovery_status": None,
+                "execution": execution,
+                "verification": verification,
+                "error": (
+                    "Remediation executed, but recovery "
+                    "verification failed to run."
+                ),
+            }
+
+        recovery_status = (
+            verification["data"]["recovery_status"]
+        )
+
+        if recovery_status == "RECOVERED":
+            status = "RECOVERED"
+            success = True
+        else:
+            status = "NOT_RECOVERED"
+            success = False
+
+        return {
+            "success": success,
+            "status": status,
+            "service": incident.service,
+            "namespace": incident.namespace,
+            "remediation_executed": True,
+            "recovery_status": recovery_status,
+            "analysis": workflow.analysis.model_dump(),
+            "risk_decision": (
+                workflow.risk_decision.model_dump()
+            ),
+            "execution": execution,
+            "verification": verification,
+            "approval": approval.model_dump(),
+        }
