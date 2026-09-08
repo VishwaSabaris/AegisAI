@@ -108,8 +108,6 @@ class IncidentOrchestrator:
                         record=record,
                     )
                 except Exception as exc:
-                    # One malformed historical record should not
-                    # prevent the orchestrator from starting.
                     print(
                         "Warning: failed to rehydrate incident "
                         f"{record.incident_id}: {exc}"
@@ -160,14 +158,6 @@ class IncidentOrchestrator:
             or "Incident state restored from PostgreSQL."
         )
 
-        # -----------------------------------------------------
-        # Reconstruct lifecycle without replaying transitions.
-        #
-        # The lifecycle manager normally starts at DETECTED.
-        # We replace its internal lifecycle snapshot with the
-        # persisted state.
-        # -----------------------------------------------------
-
         lifecycle._lifecycle = IncidentLifecycle(
             incident_id=incident.incident_id,
             service=incident.service,
@@ -184,10 +174,6 @@ class IncidentOrchestrator:
             incident.incident_id
         ] = lifecycle
 
-        # -----------------------------------------------------
-        # Restore workflow only when persisted analysis exists.
-        # -----------------------------------------------------
-
         if (
             record.severity is None
             or record.root_cause is None
@@ -200,10 +186,6 @@ class IncidentOrchestrator:
             record.remediation_action
         )
 
-        # -----------------------------------------------------
-        # Reconstruct remediation request.
-        # -----------------------------------------------------
-
         remediation_request = RemediationRequest(
             action=action,
             service=incident.service,
@@ -214,16 +196,6 @@ class IncidentOrchestrator:
         self._remediation_requests[
             incident.incident_id
         ] = remediation_request
-
-        # -----------------------------------------------------
-        # IMPORTANT:
-        #
-        # Re-evaluate risk deterministically.
-        #
-        # Do NOT trust record.remediation_risk or
-        # record.requires_approval because those values may
-        # originally have come from the LLM.
-        # -----------------------------------------------------
 
         risk_decision = (
             self.remediation_agent.risk_policy.evaluate(
@@ -525,10 +497,6 @@ class IncidentOrchestrator:
         )
 
         try:
-            # -------------------------------------------------
-            # DETECTED -> INVESTIGATING
-            # -------------------------------------------------
-
             lifecycle.transition(
                 "INVESTIGATING",
                 "Incident investigation started.",
@@ -539,19 +507,11 @@ class IncidentOrchestrator:
                 lifecycle=lifecycle,
             )
 
-            # -------------------------------------------------
-            # Investigation + AI analysis
-            # -------------------------------------------------
-
             analysis = (
                 self.investigation_agent.investigate(
                     incident
                 )
             )
-
-            # -------------------------------------------------
-            # INVESTIGATING -> ANALYZED
-            # -------------------------------------------------
 
             lifecycle.transition(
                 "ANALYZED",
@@ -568,22 +528,12 @@ class IncidentOrchestrator:
                 recovery_status=None,
             )
 
-            # -------------------------------------------------
-            # Build remediation request
-            # -------------------------------------------------
-
             remediation_request = (
                 self._build_remediation_request(
                     incident=incident,
                     workflow=workflow,
                 )
             )
-
-            # -------------------------------------------------
-            # Deterministic risk evaluation
-            #
-            # This is authoritative.
-            # -------------------------------------------------
 
             risk_decision = (
                 self.remediation_agent.evaluate(
@@ -594,15 +544,6 @@ class IncidentOrchestrator:
             approval_required = (
                 risk_decision.requires_approval
             )
-
-            # -------------------------------------------------
-            # Normalize the LLM remediation proposal using the
-            # deterministic risk policy.
-            #
-            # The action originates from the LLM, but risk and
-            # approval requirements originate from application
-            # policy.
-            # -------------------------------------------------
 
             normalized_remediation = RemediationProposal(
                 action=remediation_request.action,
@@ -640,10 +581,6 @@ class IncidentOrchestrator:
                 incident.incident_id
             ] = remediation_request
 
-            # -------------------------------------------------
-            # ANALYZED -> AWAITING_APPROVAL
-            # -------------------------------------------------
-
             if approval_required:
                 lifecycle.transition(
                     "AWAITING_APPROVAL",
@@ -658,10 +595,6 @@ class IncidentOrchestrator:
                 )
 
                 return workflow
-
-            # -------------------------------------------------
-            # Future low-risk automatic remediation path
-            # -------------------------------------------------
 
             self._persist_incident(
                 incident=incident,
@@ -763,16 +696,12 @@ class IncidentOrchestrator:
             )
         )
 
-        # The incident must still require approval according
-        # to the current deterministic policy.
         if not risk_decision.requires_approval:
             raise RuntimeError(
                 "Safety policy changed unexpectedly: "
                 "pending remediation no longer requires approval."
             )
 
-        # Keep runtime workflow synchronized with the
-        # deterministic policy.
         workflow = workflow.model_copy(
             update={
                 "risk_decision": risk_decision,
@@ -804,6 +733,17 @@ class IncidentOrchestrator:
                 "REJECTED",
                 "Human approval rejected the remediation.",
             )
+
+            workflow = workflow.model_copy(
+                update={
+                    "stage": "completed",
+                    "approval_required": False,
+                    "remediation_executed": False,
+                    "recovery_status": None,
+                }
+            )
+
+            self._workflows[incident_id] = workflow
 
             self._persist_incident(
                 incident=incident,
@@ -839,10 +779,6 @@ class IncidentOrchestrator:
             approval_status="APPROVED",
         )
 
-        # =====================================================
-        # APPROVED -> EXECUTING
-        # =====================================================
-
         lifecycle.transition(
             "EXECUTING",
             "Approved remediation execution started.",
@@ -875,6 +811,17 @@ class IncidentOrchestrator:
                     "FAILED",
                     "Remediation execution was not successful.",
                 )
+
+                workflow = workflow.model_copy(
+                    update={
+                        "stage": "completed",
+                        "approval_required": False,
+                        "remediation_executed": False,
+                        "recovery_status": "FAILED",
+                    }
+                )
+
+                self._workflows[incident_id] = workflow
 
                 self._persist_incident(
                     incident=incident,
@@ -954,6 +901,17 @@ class IncidentOrchestrator:
                     "Service recovered successfully after remediation.",
                 )
 
+                workflow = workflow.model_copy(
+                    update={
+                        "stage": "completed",
+                        "approval_required": False,
+                        "remediation_executed": True,
+                        "recovery_status": "RECOVERED",
+                    }
+                )
+
+                self._workflows[incident_id] = workflow
+
                 self._persist_incident(
                     incident=incident,
                     lifecycle=lifecycle,
@@ -983,6 +941,17 @@ class IncidentOrchestrator:
                 "Remediation completed but service did not recover.",
             )
 
+            workflow = workflow.model_copy(
+                update={
+                    "stage": "completed",
+                    "approval_required": False,
+                    "remediation_executed": True,
+                    "recovery_status": recovery_status,
+                }
+            )
+
+            self._workflows[incident_id] = workflow
+
             self._persist_incident(
                 incident=incident,
                 lifecycle=lifecycle,
@@ -1008,6 +977,17 @@ class IncidentOrchestrator:
                 "FAILED",
                 f"Remediation execution failed: {exc}",
             )
+
+            workflow = workflow.model_copy(
+                update={
+                    "stage": "completed",
+                    "approval_required": False,
+                    "remediation_executed": False,
+                    "recovery_status": "FAILED",
+                }
+            )
+
+            self._workflows[incident_id] = workflow
 
             self._persist_incident(
                 incident=incident,

@@ -117,6 +117,14 @@ def test_approved_but_unhealthy_recovery() -> None:
     )
 
     assert lifecycle.state == "FAILED"
+    final_workflow = orchestrator._workflows[
+        incident.incident_id
+    ]
+
+    assert final_workflow.stage == "completed"
+    assert final_workflow.approval_required is False
+    assert final_workflow.remediation_executed is True
+    assert final_workflow.recovery_status == "NOT_RECOVERED"
 
     history = (
         orchestrator.remediation_agent.registry
