@@ -25,7 +25,7 @@ def main():
             "Check Kubernetes service endpoints.",
         ],
         remediation={
-            "action": "Investigate PostgreSQL availability.",
+            "action": "restart_deployment",
             "risk": "medium",
             "requires_approval": True,
         },

@@ -142,6 +142,65 @@ Content:
     return "\n\n".join(sections)
 
 
+def _build_observed_evidence(
+    evidence: InvestigationEvidence,
+) -> list[str]:
+    """
+    Convert validated investigation evidence into human-readable
+    observed facts.
+
+    This function is deterministic. It is intentionally independent
+    of the LLM so that observed infrastructure facts cannot be
+    discarded or invented by the model.
+    """
+
+    observed: list[str] = []
+
+    if evidence.pod_status is not None:
+        pod_status = evidence.pod_status
+
+        observed.append(
+            f"Pod {pod_status.pod} is in phase "
+            f"{pod_status.phase}."
+        )
+
+        observed.append(
+            f"Pod {pod_status.pod} ready status is "
+            f"{pod_status.ready}."
+        )
+
+        observed.append(
+            f"Pod {pod_status.pod} has restarted "
+            f"{pod_status.restart_count} time(s)."
+        )
+
+        if pod_status.reason:
+            observed.append(
+                f"Pod {pod_status.pod} reports reason "
+                f"{pod_status.reason}."
+            )
+
+        observed.append(
+            f"Container status for pod {pod_status.pod}: "
+            f"{pod_status.container_status}."
+        )
+
+    if evidence.pod_logs is not None:
+        for log in evidence.pod_logs.logs:
+            observed.append(
+                f"Application log: {log}"
+            )
+
+    if evidence.kubernetes_events is not None:
+        for event in evidence.kubernetes_events.events:
+            observed.append(
+                f"Kubernetes {event.type} event "
+                f"{event.reason}: {event.message}"
+            )
+
+    return observed
+
+
 def ask_gemma(
     incident: Incident,
     evidence: InvestigationEvidence,
@@ -152,6 +211,10 @@ def ask_gemma(
 
     Gemma produces a validated incident analysis but does not execute
     infrastructure-changing actions.
+
+    Observed evidence in the final IncidentAnalysis is generated
+    deterministically from the validated InvestigationEvidence rather
+    than trusting the LLM to reproduce it.
     """
 
     knowledge_agent = KnowledgeAgent()
@@ -195,6 +258,8 @@ Important:
 - Use the runbook to identify relevant checks and remediation guidance.
 - If the runbook recommends checking something that was not observed,
   put that check in next_checks.
+- The evidence field should contain concise observed facts from the
+  investigation evidence.
 
 Remember:
 
@@ -287,6 +352,16 @@ Never claim that the remediation has already been executed.
             "IncidentAnalysis schema.\n\n"
             f"Gemma response:\n{raw_content}"
         ) from error
+
+    observed_evidence = _build_observed_evidence(
+        evidence
+    )
+
+    analysis = analysis.model_copy(
+        update={
+            "evidence": observed_evidence,
+        }
+    )
 
     print(
         f"\nRAG results retrieved: {len(knowledge_results)}"
