@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -77,6 +77,16 @@ class IncidentRecord(Base):
 
     confidence: Mapped[float | None] = mapped_column(
         Float,
+        nullable=True,
+    )
+
+    evidence: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    next_checks: Mapped[list[str] | None] = mapped_column(
+        JSON,
         nullable=True,
     )
 

@@ -45,6 +45,15 @@ def create_record(
                 "the PostgreSQL database."
             ),
             confidence=0.94,
+            evidence=[
+                "Pod payment-service-abc123 is not ready.",
+                "Container is in CrashLoopBackOff state.",
+                "Database connection refused on port 5432.",
+            ],
+            next_checks=[
+                "Verify PostgreSQL service availability.",
+                "Check PostgreSQL endpoint configuration.",
+            ],
             remediation_action="restart_deployment",
             remediation_risk="medium",
             requires_approval=True,
@@ -86,6 +95,9 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
     Verify that a persisted AWAITING_APPROVAL incident is
     restored into a fresh orchestrator process without
     invoking the Investigation Agent / LLM again.
+
+    Also verify that persisted evidence and next_checks are
+    restored into the reconstructed IncidentAnalysis.
     """
 
     incident_id = "rehydration-test-incident"
@@ -158,6 +170,17 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
             workflow.analysis.confidence
             == 0.94
         )
+
+        assert workflow.analysis.evidence == [
+            "Pod payment-service-abc123 is not ready.",
+            "Container is in CrashLoopBackOff state.",
+            "Database connection refused on port 5432.",
+        ]
+
+        assert workflow.analysis.next_checks == [
+            "Verify PostgreSQL service availability.",
+            "Check PostgreSQL endpoint configuration.",
+        ]
 
         assert (
             workflow.analysis.remediation.action
@@ -285,6 +308,17 @@ def test_orchestrator_rehydrates_rejected_incident_as_completed(
         assert workflow.remediation_executed is False
         assert workflow.recovery_status is None
 
+        assert workflow.analysis.evidence == [
+            "Pod payment-service-abc123 is not ready.",
+            "Container is in CrashLoopBackOff state.",
+            "Database connection refused on port 5432.",
+        ]
+
+        assert workflow.analysis.next_checks == [
+            "Verify PostgreSQL service availability.",
+            "Check PostgreSQL endpoint configuration.",
+        ]
+
     finally:
         delete_record(incident_id)
 
@@ -340,10 +374,22 @@ def test_orchestrator_rehydrates_failed_remediation_as_completed(
         assert workflow.recovery_status == "NOT_RECOVERED"
 
         assert workflow.risk_decision is not None
+
         assert (
             workflow.risk_decision.requires_approval
             is True
         )
+
+        assert workflow.analysis.evidence == [
+            "Pod payment-service-abc123 is not ready.",
+            "Container is in CrashLoopBackOff state.",
+            "Database connection refused on port 5432.",
+        ]
+
+        assert workflow.analysis.next_checks == [
+            "Verify PostgreSQL service availability.",
+            "Check PostgreSQL endpoint configuration.",
+        ]
 
     finally:
         delete_record(incident_id)

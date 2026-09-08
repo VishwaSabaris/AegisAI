@@ -211,6 +211,18 @@ class IncidentOrchestrator:
             ),
         )
 
+        persisted_evidence = (
+            record.evidence
+            if record.evidence is not None
+            else []
+        )
+
+        persisted_next_checks = (
+            record.next_checks
+            if record.next_checks is not None
+            else []
+        )
+
         analysis = IncidentAnalysis(
             severity=cast(
                 str,
@@ -218,8 +230,8 @@ class IncidentOrchestrator:
             ),
             root_cause=record.root_cause,
             confidence=record.confidence,
-            evidence=[],
-            next_checks=[],
+            evidence=list(persisted_evidence),
+            next_checks=list(persisted_next_checks),
             remediation=remediation,
         )
 
@@ -381,6 +393,10 @@ class IncidentOrchestrator:
 
         Risk and approval requirements are persisted from the
         deterministic risk decision, not from the LLM proposal.
+
+        AI analysis evidence and next checks are also persisted
+        so that the workflow can be fully reconstructed after
+        an orchestrator process restart.
         """
 
         db = SessionLocal()
@@ -417,6 +433,8 @@ class IncidentOrchestrator:
                 record.severity = analysis.severity
                 record.root_cause = analysis.root_cause
                 record.confidence = analysis.confidence
+                record.evidence = analysis.evidence
+                record.next_checks = analysis.next_checks
 
                 if workflow.risk_decision is not None:
                     record.remediation_action = (
