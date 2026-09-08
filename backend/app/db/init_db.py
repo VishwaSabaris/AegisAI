@@ -1,5 +1,5 @@
 from backend.app.core.database import Base, engine
-from backend.app.db.models import IncidentRecord
+from backend.app.db.models import IncidentRecord, KnowledgeChunk
 
 
 def init_db() -> None:

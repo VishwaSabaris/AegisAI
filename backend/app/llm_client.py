@@ -3,6 +3,7 @@ import time
 import urllib.error
 import urllib.request
 
+from backend.app.agents.knowledge import KnowledgeAgent
 from backend.app.models.evidence import InvestigationEvidence
 from backend.app.models.incident import (
     Incident,
@@ -13,12 +14,18 @@ from backend.app.models.incident import (
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "gemma3:4b-it-q4_K_M"
 
+RAG_TOP_K = 3
+
 
 SYSTEM_PROMPT = """
 You are AegisAI, an AI DevOps incident investigation assistant.
 
-Analyze infrastructure and application incidents using ONLY the
-incident information and investigation evidence provided.
+Analyze infrastructure and application incidents using:
+
+1. The incident information provided.
+2. The investigation evidence provided.
+3. The retrieved operational knowledge provided by the AegisAI
+   knowledge base.
 
 Return valid JSON only.
 
@@ -27,6 +34,17 @@ Do not use code fences.
 Do not add explanations outside the JSON object.
 
 Your response MUST follow the supplied JSON schema.
+
+IMPORTANT DISTINCTION:
+
+Investigation evidence represents observed infrastructure facts.
+
+Retrieved knowledge represents operational guidance such as runbooks.
+Retrieved knowledge is NOT proof that a particular infrastructure
+condition exists.
+
+Do not present information from the knowledge base as an observed fact
+unless that fact is also supported by the investigation evidence.
 
 IMPORTANT REMEDIATION RULE:
 
@@ -67,16 +85,61 @@ available evidence and explain the limitation in next_checks.
 Rules:
 
 1. confidence must be between 0 and 1.
-2. Evidence must come only from the incident and investigation evidence.
-3. Never invent logs, metrics, events, configuration, or infrastructure state.
-4. If information is missing, identify what needs to be checked.
-5. Infrastructure-changing actions should normally require approval.
-6. Never claim that a remediation was executed.
-7. You are proposing an action, not executing it.
-8. Distinguish observed facts from hypotheses.
-9. remediation.action must always be one of the supported machine-readable
-   identifiers defined above.
+2. Observed evidence must come only from the incident and investigation
+   evidence.
+3. Never invent logs, metrics, events, configuration, or infrastructure
+   state.
+4. Retrieved knowledge may be used to suggest checks or operational
+   guidance, but must not be treated as observed infrastructure state.
+5. If information is missing, identify what needs to be checked.
+6. Infrastructure-changing actions should normally require approval.
+7. Never claim that a remediation was executed.
+8. You are proposing an action, not executing it.
+9. Distinguish observed facts from hypotheses.
+10. remediation.action must always be one of the supported
+    machine-readable identifiers defined above.
+11. Prefer remediation guidance supported by the retrieved runbook when
+    it is relevant to the incident.
 """
+
+
+def _format_knowledge_context(
+    results,
+) -> str:
+    """
+    Convert retrieved RAG results into a compact prompt section.
+
+    Similarity scores are included for observability, but the model
+    must not treat the score itself as evidence.
+    """
+
+    if not results:
+        return (
+            "No relevant knowledge-base documents were retrieved."
+        )
+
+    sections: list[str] = []
+
+    for index, result in enumerate(results, start=1):
+        sections.append(
+            f"""
+KNOWLEDGE RESULT {index}
+
+Source:
+{result.source}
+
+Title:
+{result.title}
+
+Similarity:
+{result.similarity:.4f}
+
+Content:
+{result.content}
+""".strip()
+        )
+
+    return "\n\n".join(sections)
 
 
 def ask_gemma(
@@ -84,11 +147,28 @@ def ask_gemma(
     evidence: InvestigationEvidence,
 ) -> IncidentAnalysis:
     """
-    Send an incident and structured investigation evidence to Gemma.
+    Retrieve relevant operational knowledge and send the incident,
+    investigation evidence, and RAG context to Gemma.
 
-    Gemma is constrained by the JSON schema generated from the
-    IncidentAnalysis Pydantic model.
+    Gemma produces a validated incident analysis but does not execute
+    infrastructure-changing actions.
     """
+
+    knowledge_agent = KnowledgeAgent()
+
+    knowledge_results = knowledge_agent.retrieve(
+        query=(
+            f"DevOps incident involving service "
+            f"{incident.service}. "
+            f"Current status: {incident.status}. "
+            f"Recent log: {incident.recent_log}"
+        ),
+        limit=RAG_TOP_K,
+    )
+
+    knowledge_context = _format_knowledge_context(
+        knowledge_results
+    )
 
     incident_json = incident.model_dump_json(indent=2)
     evidence_json = evidence.model_dump_json(indent=2)
@@ -102,6 +182,20 @@ INCIDENT:
 INVESTIGATION EVIDENCE:
 {evidence_json}
 
+RETRIEVED OPERATIONAL KNOWLEDGE:
+{knowledge_context}
+
+Use the retrieved operational knowledge as supporting guidance.
+
+Important:
+
+- Do not treat the knowledge-base content as direct evidence.
+- Do not invent infrastructure facts from the runbook.
+- Base the root cause primarily on the observed investigation evidence.
+- Use the runbook to identify relevant checks and remediation guidance.
+- If the runbook recommends checking something that was not observed,
+  put that check in next_checks.
+
 Remember:
 
 remediation.action MUST be exactly one of:
@@ -111,6 +205,8 @@ remediation.action MUST be exactly one of:
 - scale_deployment
 
 Do not write a sentence in remediation.action.
+
+Never claim that the remediation has already been executed.
 """
 
     payload = {
@@ -193,6 +289,16 @@ Do not write a sentence in remediation.action.
         ) from error
 
     print(
+        f"\nRAG results retrieved: {len(knowledge_results)}"
+    )
+
+    for result in knowledge_results:
+        print(
+            f"  - {result.title} "
+            f"(similarity={result.similarity:.4f})"
+        )
+
+    print(
         f"\nInference time: {elapsed:.2f} seconds"
     )
 
@@ -216,7 +322,7 @@ def main():
     )
 
     print("=" * 60)
-    print("AegisAI - Gemma + Structured Evidence")
+    print("AegisAI - Gemma + RAG + Structured Evidence")
     print("=" * 60)
 
     print("\nIncident:")
@@ -233,8 +339,18 @@ def main():
         )
     )
 
+    print("\nRunning Gemma with RAG...")
+
+    analysis = ask_gemma(
+        incident=incident,
+        evidence=evidence,
+    )
+
+    print("\nGemma Analysis:")
     print(
-        "\nNote: This direct client test uses empty evidence."
+        analysis.model_dump_json(
+            indent=2
+        )
     )
 
 

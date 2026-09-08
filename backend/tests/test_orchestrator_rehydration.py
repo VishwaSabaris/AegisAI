@@ -1,20 +1,16 @@
 from backend.app.core.database import SessionLocal
 from backend.app.db.models import IncidentRecord
-from backend.app.models.incident import Incident
 from backend.app.services.orchestrator import IncidentOrchestrator
 
 
-def test_orchestrator_rehydrates_pending_approval_without_llm(
-    monkeypatch,
-):
-    """
-    Verify that a persisted AWAITING_APPROVAL incident is
-    restored into a fresh orchestrator process without
-    invoking the Investigation Agent / LLM again.
-    """
-
-    incident_id = "rehydration-test-incident"
-
+def create_record(
+    incident_id: str,
+    lifecycle_state: str,
+    previous_state: str,
+    lifecycle_message: str,
+    approval_status: str,
+    recovery_status: str | None,
+) -> None:
     db = SessionLocal()
 
     try:
@@ -40,11 +36,9 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
                 "ERROR Database connection refused "
                 "on port 5432"
             ),
-            lifecycle_state="AWAITING_APPROVAL",
-            previous_lifecycle_state="ANALYZED",
-            lifecycle_message=(
-                "Remediation requires explicit human approval."
-            ),
+            lifecycle_state=lifecycle_state,
+            previous_lifecycle_state=previous_state,
+            lifecycle_message=lifecycle_message,
             severity="high",
             root_cause=(
                 "The payment-service cannot connect to "
@@ -54,8 +48,8 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
             remediation_action="restart_deployment",
             remediation_risk="medium",
             requires_approval=True,
-            approval_status="PENDING",
-            recovery_status=None,
+            approval_status=approval_status,
+            recovery_status=recovery_status,
         )
 
         db.add(record)
@@ -63,6 +57,49 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
 
     finally:
         db.close()
+
+
+def delete_record(incident_id: str) -> None:
+    db = SessionLocal()
+
+    try:
+        record = (
+            db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.incident_id == incident_id
+            )
+            .first()
+        )
+
+        if record is not None:
+            db.delete(record)
+            db.commit()
+
+    finally:
+        db.close()
+
+
+def test_orchestrator_rehydrates_pending_approval_without_llm(
+    monkeypatch,
+):
+    """
+    Verify that a persisted AWAITING_APPROVAL incident is
+    restored into a fresh orchestrator process without
+    invoking the Investigation Agent / LLM again.
+    """
+
+    incident_id = "rehydration-test-incident"
+
+    create_record(
+        incident_id=incident_id,
+        lifecycle_state="AWAITING_APPROVAL",
+        previous_state="ANALYZED",
+        lifecycle_message=(
+            "Remediation requires explicit human approval."
+        ),
+        approval_status="PENDING",
+        recovery_status=None,
+    )
 
     llm_called = False
 
@@ -138,6 +175,7 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
         )
 
         assert workflow.approval_required is True
+        assert workflow.remediation_executed is False
         assert workflow.recovery_status is None
 
         remediation_request = (
@@ -193,21 +231,119 @@ def test_orchestrator_rehydrates_pending_approval_without_llm(
         assert llm_called is False
 
     finally:
-        db = SessionLocal()
+        delete_record(incident_id)
 
-        try:
-            record = (
-                db.query(IncidentRecord)
-                .filter(
-                    IncidentRecord.incident_id
-                    == incident_id
-                )
-                .first()
-            )
 
-            if record is not None:
-                db.delete(record)
-                db.commit()
+def test_orchestrator_rehydrates_rejected_incident_as_completed(
+    monkeypatch,
+):
+    """
+    Verify that a rejected remediation is restored as a
+    completed workflow and is no longer marked as awaiting
+    approval.
+    """
 
-        finally:
-            db.close()
+    incident_id = "rehydration-rejected-incident"
+
+    create_record(
+        incident_id=incident_id,
+        lifecycle_state="REJECTED",
+        previous_state="AWAITING_APPROVAL",
+        lifecycle_message=(
+            "Human approval rejected the remediation."
+        ),
+        approval_status="REJECTED",
+        recovery_status=None,
+    )
+
+    def fail_if_llm_called(*args, **kwargs):
+        raise AssertionError(
+            "LLM should not be called during rehydration."
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.orchestrator.InvestigationAgent.investigate",
+        fail_if_llm_called,
+    )
+
+    try:
+        orchestrator = IncidentOrchestrator()
+
+        lifecycle = orchestrator.get_lifecycle(
+            incident_id
+        )
+
+        assert lifecycle.state == "REJECTED"
+
+        workflow = orchestrator._workflows.get(
+            incident_id
+        )
+
+        assert workflow is not None
+        assert workflow.stage == "completed"
+        assert workflow.approval_required is False
+        assert workflow.remediation_executed is False
+        assert workflow.recovery_status is None
+
+    finally:
+        delete_record(incident_id)
+
+
+def test_orchestrator_rehydrates_failed_remediation_as_completed(
+    monkeypatch,
+):
+    """
+    Verify that a remediation which was approved and executed
+    but failed recovery is restored as a completed workflow.
+    """
+
+    incident_id = "rehydration-failed-incident"
+
+    create_record(
+        incident_id=incident_id,
+        lifecycle_state="FAILED",
+        previous_state="VERIFYING",
+        lifecycle_message=(
+            "Remediation completed but service did not recover."
+        ),
+        approval_status="APPROVED",
+        recovery_status="NOT_RECOVERED",
+    )
+
+    def fail_if_llm_called(*args, **kwargs):
+        raise AssertionError(
+            "LLM should not be called during rehydration."
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.orchestrator.InvestigationAgent.investigate",
+        fail_if_llm_called,
+    )
+
+    try:
+        orchestrator = IncidentOrchestrator()
+
+        lifecycle = orchestrator.get_lifecycle(
+            incident_id
+        )
+
+        assert lifecycle.state == "FAILED"
+
+        workflow = orchestrator._workflows.get(
+            incident_id
+        )
+
+        assert workflow is not None
+        assert workflow.stage == "completed"
+        assert workflow.approval_required is False
+        assert workflow.remediation_executed is True
+        assert workflow.recovery_status == "NOT_RECOVERED"
+
+        assert workflow.risk_decision is not None
+        assert (
+            workflow.risk_decision.requires_approval
+            is True
+        )
+
+    finally:
+        delete_record(incident_id)
