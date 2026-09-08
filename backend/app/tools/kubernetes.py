@@ -824,9 +824,12 @@ def verify_deployment(
             )
 
         pod_result = {
-            **initial_state,
+           **(
+               current_state
+               if "current_state" in locals()
+               else initial_state
+           ),
         }
-
         return {
             "success": True,
             "data": {
