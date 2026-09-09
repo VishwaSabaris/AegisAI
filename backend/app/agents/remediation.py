@@ -2,6 +2,11 @@ from backend.app.models.remediation import (
     RemediationRequest,
     RiskDecision,
 )
+from backend.app.services.metrics import (
+    RECOVERY_RESULTS_TOTAL,
+    REMEDIATION_ATTEMPTS_TOTAL,
+    REMEDIATION_RESULTS_TOTAL,
+)
 from backend.app.services.risk_policy import (
     RemediationRiskPolicy,
 )
@@ -92,15 +97,32 @@ class RemediationAgent:
                 ),
             }
 
+        REMEDIATION_ATTEMPTS_TOTAL.labels(
+            action=request.action
+        ).inc()
+
         if request.action == "restart_deployment":
-            return self.registry.call(
+            result = self.registry.call(
                 "restart_deployment",
                 service=request.service,
                 namespace=request.namespace,
                 approved=approved,
             )
 
-        return {
+            result_label = (
+                "success"
+                if result.get("success") is True
+                else "failure"
+            )
+
+            REMEDIATION_RESULTS_TOTAL.labels(
+                action=request.action,
+                result=result_label,
+            ).inc()
+
+            return result
+
+        result = {
             "success": False,
             "action": request.action,
             "service": request.service,
@@ -110,6 +132,13 @@ class RemediationAgent:
                 "is not implemented yet."
             ),
         }
+
+        REMEDIATION_RESULTS_TOTAL.labels(
+            action=request.action,
+            result="failure",
+        ).inc()
+
+        return result
 
     def verify(
         self,
@@ -122,8 +151,26 @@ class RemediationAgent:
         Verification is read-only and does not require approval.
         """
 
-        return self.registry.call(
+        result = self.registry.call(
             "verify_deployment",
             service=service,
             namespace=namespace,
         )
+
+        recovery_status = (
+            result.get("data", {})
+            .get("recovery_status")
+        )
+
+        if recovery_status == "RECOVERED":
+            status_label = "recovered"
+        elif recovery_status == "NOT_RECOVERED":
+            status_label = "not_recovered"
+        else:
+            status_label = "unknown"
+
+        RECOVERY_RESULTS_TOTAL.labels(
+            status=status_label
+        ).inc()
+
+        return result

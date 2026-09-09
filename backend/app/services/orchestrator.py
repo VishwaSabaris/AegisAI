@@ -158,16 +158,18 @@ class IncidentOrchestrator:
             or "Incident state restored from PostgreSQL."
         )
 
-        lifecycle._lifecycle = IncidentLifecycle(
-            incident_id=incident.incident_id,
-            service=incident.service,
-            namespace=incident.namespace,
-            state=persisted_state,
-            previous_state=cast(
-                IncidentState | None,
-                persisted_previous_state,
-            ),
-            message=persisted_message,
+        lifecycle.restore(
+            IncidentLifecycle(
+                incident_id=incident.incident_id,
+                service=incident.service,
+                namespace=incident.namespace,
+                state=persisted_state,
+                previous_state=cast(
+                    IncidentState | None,
+                    persisted_previous_state,
+                ),
+                message=persisted_message,
+            )
         )
 
         self._lifecycle_managers[
@@ -342,16 +344,25 @@ class IncidentOrchestrator:
     ) -> IncidentLifecycleManager:
         """
         Get an existing runtime lifecycle manager or create one.
+
+        Newly created incidents are explicitly registered as
+        DETECTED so lifecycle metrics do not confuse manager
+        construction during PostgreSQL rehydration with new
+        incident detection.
         """
 
         if incident.incident_id not in self._lifecycle_managers:
-            self._lifecycle_managers[
-                incident.incident_id
-            ] = IncidentLifecycleManager(
+            lifecycle = IncidentLifecycleManager(
                 incident_id=incident.incident_id,
                 service=incident.service,
                 namespace=incident.namespace,
             )
+
+            lifecycle.mark_detected()
+
+            self._lifecycle_managers[
+                incident.incident_id
+            ] = lifecycle
 
         return self._lifecycle_managers[
             incident.incident_id

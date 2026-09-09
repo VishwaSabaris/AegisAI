@@ -2,13 +2,18 @@ from backend.app.models.lifecycle import (
     IncidentLifecycle,
     IncidentState,
 )
+from backend.app.services.metrics import (
+    INCIDENTS_BY_STATE,
+)
 
 
 class IncidentLifecycleManager:
     """
-    Deterministic state machine for AegisAI incidents.
+    Owns and validates the lifecycle state of one incident.
 
-    The LLM cannot directly change lifecycle state.
+    Lifecycle manager construction itself does not modify metrics.
+    New incidents explicitly call mark_detected(), while persisted
+    incidents call restore() with their database state.
     """
 
     _TRANSITIONS: dict[
@@ -17,6 +22,7 @@ class IncidentLifecycleManager:
     ] = {
         "DETECTED": {
             "INVESTIGATING",
+            "FAILED",
         },
         "INVESTIGATING": {
             "ANALYZED",
@@ -24,6 +30,7 @@ class IncidentLifecycleManager:
         },
         "ANALYZED": {
             "AWAITING_APPROVAL",
+            "EXECUTING",
             "FAILED",
         },
         "AWAITING_APPROVAL": {
@@ -35,8 +42,7 @@ class IncidentLifecycleManager:
             "EXECUTING",
             "FAILED",
         },
-        "REJECTED": {
-        },
+        "REJECTED": set(),
         "EXECUTING": {
             "VERIFYING",
             "FAILED",
@@ -45,10 +51,9 @@ class IncidentLifecycleManager:
             "RECOVERED",
             "FAILED",
         },
-        "RECOVERED": {
-        },
-        "FAILED": {
-        },
+        "RECOVERED": set(),
+        "FAILED": set(),
+        "COMPLETED": set(),
     }
 
     def __init__(
@@ -69,20 +74,52 @@ class IncidentLifecycleManager:
     @property
     def lifecycle(self) -> IncidentLifecycle:
         """
-        Return the current lifecycle state.
+        Return the current lifecycle object.
         """
 
-        return self._lifecycle.model_copy(
-            deep=True
-        )
+        return self._lifecycle
 
     @property
     def state(self) -> IncidentState:
         """
-        Return the current state.
+        Return the current lifecycle state.
         """
 
         return self._lifecycle.state
+
+    def mark_detected(self) -> IncidentLifecycle:
+        """
+        Register a newly created incident as DETECTED.
+
+        This is intentionally separate from __init__ so that creating
+        a lifecycle manager during PostgreSQL rehydration does not
+        incorrectly increment the DETECTED metric.
+        """
+
+        INCIDENTS_BY_STATE.labels(
+            state="DETECTED"
+        ).inc()
+
+        return self.lifecycle
+
+    def restore(
+        self,
+        lifecycle: IncidentLifecycle,
+    ) -> IncidentLifecycle:
+        """
+        Restore a persisted lifecycle state.
+
+        Only the persisted state is added to the lifecycle gauge.
+        No DETECTED increment is performed during restoration.
+        """
+
+        self._lifecycle = lifecycle
+
+        INCIDENTS_BY_STATE.labels(
+            state=lifecycle.state
+        ).inc()
+
+        return self.lifecycle
 
     def transition(
         self,
@@ -90,7 +127,7 @@ class IncidentLifecycleManager:
         message: str,
     ) -> IncidentLifecycle:
         """
-        Perform a validated lifecycle transition.
+        Transition the incident to a validated next state.
         """
 
         current_state = self._lifecycle.state
@@ -102,10 +139,8 @@ class IncidentLifecycleManager:
 
         if new_state not in allowed_states:
             raise ValueError(
-                f"Invalid incident lifecycle transition: "
-                f"{current_state} -> {new_state}. "
-                f"Allowed transitions: "
-                f"{sorted(allowed_states)}"
+                f"Invalid lifecycle transition: "
+                f"{current_state} -> {new_state}"
             )
 
         self._lifecycle = IncidentLifecycle(
@@ -117,6 +152,14 @@ class IncidentLifecycleManager:
             message=message,
         )
 
+        INCIDENTS_BY_STATE.labels(
+            state=current_state
+        ).dec()
+
+        INCIDENTS_BY_STATE.labels(
+            state=new_state
+        ).inc()
+
         return self.lifecycle
 
     @classmethod
@@ -125,10 +168,10 @@ class IncidentLifecycleManager:
         state: IncidentState,
     ) -> list[IncidentState]:
         """
-        Return valid next states for a given state.
+        Return the states allowed from the supplied state.
         """
 
-        return sorted(
+        return list(
             cls._TRANSITIONS.get(
                 state,
                 set(),

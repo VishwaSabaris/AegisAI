@@ -3,6 +3,9 @@ import time
 import urllib.error
 import urllib.request
 
+from backend.app.services.metrics import (
+    LLM_INFERENCE_DURATION_SECONDS,
+)
 from backend.app.agents.knowledge import KnowledgeAgent
 from backend.app.models.evidence import InvestigationEvidence
 from backend.app.models.incident import (
@@ -373,7 +376,9 @@ Never claim that the remediation has already been executed.
             f"Error: {error}"
         ) from error
 
-    elapsed = time.perf_counter() - start_time
+    finally:
+        elapsed = time.perf_counter() - start_time
+        LLM_INFERENCE_DURATION_SECONDS.observe(elapsed)
 
     try:
         ollama_response = json.loads(response_data)

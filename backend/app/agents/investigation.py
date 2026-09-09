@@ -1,3 +1,5 @@
+import time
+
 from backend.app.llm_client import ask_gemma
 from backend.app.models.evidence import (
     InvestigationEvidence,
@@ -8,6 +10,9 @@ from backend.app.models.evidence import (
     ServiceDependencyEvidence,
 )
 from backend.app.models.incident import Incident, IncidentAnalysis
+from backend.app.services.metrics import (
+    INVESTIGATION_DURATION_SECONDS,
+)
 from backend.app.tools.kubernetes import (
     get_kubernetes_events,
     get_pod_logs,
@@ -152,9 +157,16 @@ class InvestigationAgent:
         a validated AI incident analysis.
         """
 
-        evidence = self.collect_evidence(incident)
+        start_time = time.perf_counter()
 
-        return ask_gemma(
-            incident=incident,
-            evidence=evidence,
-        )
+        try:
+            evidence = self.collect_evidence(incident)
+
+            return ask_gemma(
+                incident=incident,
+                evidence=evidence,
+            )
+
+        finally:
+            elapsed = time.perf_counter() - start_time
+            INVESTIGATION_DURATION_SECONDS.observe(elapsed)
