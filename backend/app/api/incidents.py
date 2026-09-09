@@ -174,19 +174,18 @@ def get_incident(
             "message": record.lifecycle_message,
         }
 
-    workflow = _orchestrator._workflows.get(
-        incident_id
-    )
+    try:
+        workflow = _orchestrator.get_workflow(
+            incident_id
+        ).model_dump()
+    except KeyError:
+        workflow = None
 
     return {
         "success": True,
         "incident": incident.model_dump(),
         "lifecycle": lifecycle,
-        "workflow": (
-            workflow.model_dump()
-            if workflow is not None
-            else None
-        ),
+        "workflow": workflow,
         "approval_status": record.approval_status,
         "recovery_status": record.recovery_status,
         "created_at": record.created_at.isoformat(),

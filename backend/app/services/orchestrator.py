@@ -376,6 +376,29 @@ class IncidentOrchestrator:
 
         return manager.lifecycle
 
+    def get_workflow(
+        self,
+        incident_id: str,
+    ) -> IncidentWorkflowResult:
+        """
+        Return the current workflow state for an incident.
+
+        Workflow state is restored from PostgreSQL during
+        orchestrator initialization and then maintained in
+        memory during the process lifetime.
+        """
+
+        workflow = self._workflows.get(
+            incident_id
+        )
+
+        if workflow is None:
+            raise KeyError(
+                f"No workflow found for incident: {incident_id}"
+            )
+
+        return workflow
+
     # =========================================================
     # Database Persistence
     # =========================================================
@@ -389,14 +412,10 @@ class IncidentOrchestrator:
         recovery_status: str | None = None,
     ) -> None:
         """
-        Persist the current incident state to PostgreSQL.
+        Persist the current incident lifecycle and workflow state.
 
-        Risk and approval requirements are persisted from the
-        deterministic risk decision, not from the LLM proposal.
-
-        AI analysis evidence and next checks are also persisted
-        so that the workflow can be fully reconstructed after
-        an orchestrator process restart.
+        The analysis evidence and next checks are persisted so
+        that they can be restored after an orchestrator restart.
         """
 
         db = SessionLocal()
@@ -413,18 +432,18 @@ class IncidentOrchestrator:
                     incident
                 )
 
-            current_lifecycle = lifecycle.lifecycle
+            lifecycle_state = lifecycle.lifecycle
 
             record.lifecycle_state = (
-                current_lifecycle.state
+                lifecycle_state.state
             )
 
             record.previous_lifecycle_state = (
-                current_lifecycle.previous_state
+                lifecycle_state.previous_state
             )
 
             record.lifecycle_message = (
-                current_lifecycle.message
+                lifecycle_state.message
             )
 
             if workflow is not None:
@@ -436,28 +455,23 @@ class IncidentOrchestrator:
                 record.evidence = analysis.evidence
                 record.next_checks = analysis.next_checks
 
-                if workflow.risk_decision is not None:
-                    record.remediation_action = (
-                        workflow.risk_decision.action
-                    )
+                record.remediation_action = (
+                    analysis.remediation.action
+                )
 
-                    record.remediation_risk = (
-                        workflow.risk_decision.risk
-                    )
+                record.remediation_risk = (
+                    analysis.remediation.risk
+                )
 
-                    record.requires_approval = (
-                        workflow.risk_decision.requires_approval
-                    )
+                record.requires_approval = (
+                    analysis.remediation.requires_approval
+                )
 
             if approval_status is not None:
-                record.approval_status = (
-                    approval_status
-                )
+                record.approval_status = approval_status
 
             if recovery_status is not None:
-                record.recovery_status = (
-                    recovery_status
-                )
+                record.recovery_status = recovery_status
 
             repository.update(record)
 
@@ -465,28 +479,30 @@ class IncidentOrchestrator:
             db.close()
 
     # =========================================================
-    # Remediation
+    # Remediation Request
     # =========================================================
 
     def _build_remediation_request(
         self,
         incident: Incident,
-        workflow: IncidentWorkflowResult,
+        analysis: IncidentAnalysis,
     ) -> RemediationRequest:
         """
-        Convert the AI remediation proposal into a validated
-        application-level remediation request.
+        Build a remediation request from the validated analysis.
+
+        The action is validated against the application-level
+        allowlist before being passed to the risk policy.
         """
 
         action = self._validate_remediation_action(
-            workflow.analysis.remediation.action
+            analysis.remediation.action
         )
 
         return RemediationRequest(
             action=action,
             service=incident.service,
             namespace=incident.namespace,
-            reason=workflow.analysis.root_cause,
+            reason=analysis.root_cause,
         )
 
     # =========================================================
@@ -498,174 +514,151 @@ class IncidentOrchestrator:
         incident: Incident,
     ) -> IncidentWorkflowResult:
         """
-        Process a newly detected incident.
+        Process a new incident through investigation,
+        analysis, risk evaluation, and approval gating.
 
-        The incident is investigated once.
-
-        Approval does not cause the investigation or LLM
-        analysis to run again.
-
-        The deterministic risk policy controls whether approval
-        is required. The LLM's approval recommendation is not
-        trusted for execution decisions.
+        Infrastructure-changing remediation is never executed
+        automatically when approval is required.
         """
 
         lifecycle = self._get_or_create_lifecycle(
             incident
         )
 
-        try:
-            lifecycle.transition(
-                "INVESTIGATING",
-                "Incident investigation started.",
-            )
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+        )
 
-            self._persist_incident(
+        lifecycle.transition(
+            "INVESTIGATING",
+            message="Investigation started.",
+        )
+
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+        )
+
+        analysis = (
+            self.investigation_agent.investigate(
+                incident
+            )
+        )
+
+        lifecycle.transition(
+            "ANALYZED",
+            message="Investigation completed.",
+        )
+
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+        )
+
+        remediation_request = (
+            self._build_remediation_request(
                 incident=incident,
-                lifecycle=lifecycle,
-            )
-
-            analysis = (
-                self.investigation_agent.investigate(
-                    incident
-                )
-            )
-
-            lifecycle.transition(
-                "ANALYZED",
-                "Incident investigation and root-cause analysis completed.",
-            )
-
-            workflow = IncidentWorkflowResult(
-                stage="analysis",
-                incident=incident.service,
                 analysis=analysis,
-                risk_decision=None,
-                approval_required=False,
-                remediation_executed=False,
-                recovery_status=None,
             )
+        )
 
-            remediation_request = (
-                self._build_remediation_request(
-                    incident=incident,
-                    workflow=workflow,
+        self._remediation_requests[
+            incident.incident_id
+        ] = remediation_request
+
+        risk_decision = (
+            self.remediation_agent.evaluate(
+                remediation_request
+            )
+        )
+
+        analysis = analysis.model_copy(
+            update={
+                "remediation": RemediationProposal(
+                    action=remediation_request.action,
+                    risk=risk_decision.risk,
+                    requires_approval=(
+                        risk_decision.requires_approval
+                    ),
                 )
-            )
+            }
+        )
 
-            risk_decision = (
-                self.remediation_agent.evaluate(
-                    remediation_request
-                )
-            )
-
-            approval_required = (
+        workflow = IncidentWorkflowResult(
+            stage="remediation_evaluation",
+            incident=incident.service,
+            analysis=analysis,
+            risk_decision=risk_decision,
+            approval_required=(
                 risk_decision.requires_approval
-            )
+            ),
+            remediation_executed=False,
+            recovery_status=None,
+        )
 
-            normalized_remediation = RemediationProposal(
-                action=remediation_request.action,
-                risk=risk_decision.risk,
-                requires_approval=(
-                    risk_decision.requires_approval
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+            workflow=workflow,
+        )
+
+        if risk_decision.requires_approval:
+            lifecycle.transition(
+                "AWAITING_APPROVAL",
+                message=(
+                    "Remediation requires explicit "
+                    "human approval."
                 ),
             )
 
-            analysis = analysis.model_copy(
+            workflow = workflow.model_copy(
                 update={
-                    "remediation": normalized_remediation,
+                    "stage": "approval_required",
+                    "approval_required": True,
                 }
-            )
-
-            workflow = IncidentWorkflowResult(
-                stage=(
-                    "approval_required"
-                    if approval_required
-                    else "remediation_evaluation"
-                ),
-                incident=incident.service,
-                analysis=analysis,
-                risk_decision=risk_decision,
-                approval_required=approval_required,
-                remediation_executed=False,
-                recovery_status=None,
             )
 
             self._workflows[
                 incident.incident_id
             ] = workflow
 
-            self._remediation_requests[
-                incident.incident_id
-            ] = remediation_request
-
-            if approval_required:
-                lifecycle.transition(
-                    "AWAITING_APPROVAL",
-                    "Remediation requires explicit human approval.",
-                )
-
-                self._persist_incident(
-                    incident=incident,
-                    lifecycle=lifecycle,
-                    workflow=workflow,
-                    approval_status="PENDING",
-                )
-
-                return workflow
-
             self._persist_incident(
                 incident=incident,
                 lifecycle=lifecycle,
                 workflow=workflow,
-                approval_status="NOT_REQUIRED",
+                approval_status="PENDING",
             )
 
             return workflow
 
-        except Exception as exc:
-            try:
-                lifecycle.transition(
-                    "FAILED",
-                    f"Incident workflow failed: {exc}",
-                )
+        self._workflows[
+            incident.incident_id
+        ] = workflow
 
-                self._persist_incident(
-                    incident=incident,
-                    lifecycle=lifecycle,
-                    workflow=self._workflows.get(
-                        incident.incident_id
-                    ),
-                    approval_status="FAILED",
-                    recovery_status="FAILED",
-                )
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+            workflow=workflow,
+        )
 
-            except Exception:
-                pass
-
-            raise
+        return workflow
 
     # =========================================================
-    # Approval + Execution
+    # Approval / Execution
     # =========================================================
 
     def approve_and_execute(
         self,
         incident: Incident,
         approval: RemediationApproval,
-    ) -> dict[str, object]:
+    ) -> dict:
         """
-        Approve or reject a pending remediation.
+        Apply a human approval decision and execute remediation
+        when approved.
 
-        The incident is NOT re-analyzed during approval.
-
-        The previously generated workflow and remediation
-        request are reused.
-
-        Persisted workflow state can also be used after an
-        orchestrator process restart.
-
-        The deterministic risk policy remains authoritative.
+        Existing analysis and remediation request are reused.
+        The incident is not sent through investigation again.
         """
 
         incident_id = incident.incident_id
@@ -679,11 +672,6 @@ class IncidentOrchestrator:
                 f"No lifecycle found for incident: {incident_id}"
             )
 
-        if lifecycle.state != "AWAITING_APPROVAL":
-            raise ValueError(
-                "Incident is not awaiting approval."
-            )
-
         workflow = self._workflows.get(
             incident_id
         )
@@ -691,6 +679,11 @@ class IncidentOrchestrator:
         if workflow is None:
             raise KeyError(
                 f"No workflow found for incident: {incident_id}"
+            )
+
+        if lifecycle.lifecycle.state != "AWAITING_APPROVAL":
+            raise ValueError(
+                "Incident is not awaiting approval."
             )
 
         remediation_request = (
@@ -704,55 +697,19 @@ class IncidentOrchestrator:
                 f"No remediation request found for incident: {incident_id}"
             )
 
-        # =====================================================
-        # RE-VALIDATE DETERMINISTIC RISK POLICY
-        # =====================================================
-
-        risk_decision = (
-            self.remediation_agent.evaluate(
-                remediation_request
-            )
-        )
-
-        if not risk_decision.requires_approval:
-            raise RuntimeError(
-                "Safety policy changed unexpectedly: "
-                "pending remediation no longer requires approval."
-            )
-
-        workflow = workflow.model_copy(
-            update={
-                "risk_decision": risk_decision,
-                "approval_required": (
-                    risk_decision.requires_approval
-                ),
-                "analysis": workflow.analysis.model_copy(
-                    update={
-                        "remediation": RemediationProposal(
-                            action=remediation_request.action,
-                            risk=risk_decision.risk,
-                            requires_approval=(
-                                risk_decision.requires_approval
-                            ),
-                        )
-                    }
-                ),
-            }
-        )
-
-        self._workflows[incident_id] = workflow
-
-        # =====================================================
-        # REJECTED APPROVAL
-        # =====================================================
+        # -----------------------------------------------------
+        # Rejected approval
+        # -----------------------------------------------------
 
         if not approval.approved:
             lifecycle.transition(
                 "REJECTED",
-                "Human approval rejected the remediation.",
+                message=(
+                    "Remediation rejected by human approver."
+                ),
             )
 
-            workflow = workflow.model_copy(
+            rejected_workflow = workflow.model_copy(
                 update={
                     "stage": "completed",
                     "approval_required": False,
@@ -761,33 +718,45 @@ class IncidentOrchestrator:
                 }
             )
 
-            self._workflows[incident_id] = workflow
+            self._workflows[
+                incident_id
+            ] = rejected_workflow
 
             self._persist_incident(
                 incident=incident,
                 lifecycle=lifecycle,
-                workflow=workflow,
+                workflow=rejected_workflow,
                 approval_status="REJECTED",
-                recovery_status=None,
             )
 
             return {
                 "success": False,
                 "status": "REJECTED",
                 "incident_id": incident_id,
-                "state": lifecycle.state,
-                "approved": False,
+                "approval": {
+                    "approved": False,
+                    "approved_by": approval.approved_by,
+                    "comment": approval.comment,
+                },
                 "remediation_executed": False,
                 "recovery_status": None,
+                "workflow": (
+                    rejected_workflow.model_dump()
+                ),
+                "lifecycle": (
+                    lifecycle.lifecycle.model_dump()
+                ),
             }
 
-        # =====================================================
-        # APPROVED
-        # =====================================================
+        # -----------------------------------------------------
+        # Approval accepted
+        # -----------------------------------------------------
 
         lifecycle.transition(
             "APPROVED",
-            "Human approval granted for remediation.",
+            message=(
+                "Remediation approved by human approver."
+            ),
         )
 
         self._persist_incident(
@@ -799,7 +768,9 @@ class IncidentOrchestrator:
 
         lifecycle.transition(
             "EXECUTING",
-            "Approved remediation execution started.",
+            message=(
+                "Approved remediation execution started."
+            ),
         )
 
         self._persist_incident(
@@ -809,210 +780,173 @@ class IncidentOrchestrator:
             approval_status="APPROVED",
         )
 
-        try:
-            execution_result = (
-                self.remediation_agent.execute(
-                    request=remediation_request,
-                    approved=True,
-                )
+        # -----------------------------------------------------
+        # Execute remediation
+        # -----------------------------------------------------
+
+        execution_result = (
+            self.remediation_agent.execute(
+                request=remediation_request,
+                approved=True,
             )
+        )
 
-            # =================================================
-            # Remediation execution failed
-            # =================================================
-
-            if not execution_result.get(
-                "success",
-                False,
-            ):
-                lifecycle.transition(
-                    "FAILED",
-                    "Remediation execution was not successful.",
-                )
-
-                workflow = workflow.model_copy(
-                    update={
-                        "stage": "completed",
-                        "approval_required": False,
-                        "remediation_executed": False,
-                        "recovery_status": "FAILED",
-                    }
-                )
-
-                self._workflows[incident_id] = workflow
-
-                self._persist_incident(
-                    incident=incident,
-                    lifecycle=lifecycle,
-                    workflow=workflow,
-                    approval_status="APPROVED",
-                    recovery_status="FAILED",
-                )
-
-                return {
-                    "success": False,
-                    "status": "FAILED",
-                    "incident_id": incident_id,
-                    "state": lifecycle.state,
-                    "approved": True,
-                    "remediation_executed": False,
-                    "execution": execution_result,
-                    "recovery_status": "FAILED",
-                }
-
-            # =================================================
-            # EXECUTING -> VERIFYING
-            # =================================================
-
-            lifecycle.transition(
-                "VERIFYING",
-                "Remediation execution completed. Recovery verification started.",
-            )
-
-            self._persist_incident(
-                incident=incident,
-                lifecycle=lifecycle,
-                workflow=workflow,
-                approval_status="APPROVED",
-            )
-
-            # =================================================
-            # Recovery verification
-            # =================================================
-
-            recovery_result = (
-                self.remediation_agent.verify(
-                    service=remediation_request.service,
-                    namespace=remediation_request.namespace,
-                )
-            )
-
-            if isinstance(
-                recovery_result,
-                dict,
-            ):
-                recovery_data = recovery_result.get(
-                    "data",
-                    recovery_result,
-                )
-
-                recovery_status = recovery_data.get(
-                    "recovery_status",
-                    recovery_data.get(
-                        "status",
-                        "NOT_RECOVERED",
-                    ),
-                )
-
-            else:
-                recovery_status = str(
-                    recovery_result
-                )
-
-            # =================================================
-            # Recovery successful
-            # =================================================
-
-            if recovery_status == "RECOVERED":
-                lifecycle.transition(
-                    "RECOVERED",
-                    "Service recovered successfully after remediation.",
-                )
-
-                workflow = workflow.model_copy(
-                    update={
-                        "stage": "completed",
-                        "approval_required": False,
-                        "remediation_executed": True,
-                        "recovery_status": "RECOVERED",
-                    }
-                )
-
-                self._workflows[incident_id] = workflow
-
-                self._persist_incident(
-                    incident=incident,
-                    lifecycle=lifecycle,
-                    workflow=workflow,
-                    approval_status="APPROVED",
-                    recovery_status="RECOVERED",
-                )
-
-                return {
-                    "success": True,
-                    "status": "RECOVERED",
-                    "incident_id": incident_id,
-                    "state": lifecycle.state,
-                    "approved": True,
-                    "remediation_executed": True,
-                    "execution": execution_result,
-                    "recovery_status": "RECOVERED",
-                    "verification": recovery_result,
-                }
-
-            # =================================================
-            # Remediation executed but recovery failed
-            # =================================================
-
+        if not execution_result.get("success"):
             lifecycle.transition(
                 "FAILED",
-                "Remediation completed but service did not recover.",
+                message=(
+                    "Approved remediation execution failed."
+                ),
             )
 
-            workflow = workflow.model_copy(
+            failed_workflow = workflow.model_copy(
                 update={
                     "stage": "completed",
                     "approval_required": False,
-                    "remediation_executed": True,
-                    "recovery_status": recovery_status,
+                    "remediation_executed": False,
+                    "recovery_status": "NOT_RECOVERED",
                 }
             )
 
-            self._workflows[incident_id] = workflow
+            self._workflows[
+                incident_id
+            ] = failed_workflow
 
             self._persist_incident(
                 incident=incident,
                 lifecycle=lifecycle,
-                workflow=workflow,
+                workflow=failed_workflow,
                 approval_status="APPROVED",
-                recovery_status=recovery_status,
+                recovery_status="NOT_RECOVERED",
             )
 
             return {
                 "success": False,
-                "status": recovery_status,
+                "status": "FAILED",
                 "incident_id": incident_id,
-                "state": lifecycle.state,
-                "approved": True,
-                "remediation_executed": True,
+                "approval": {
+                    "approved": True,
+                    "approved_by": approval.approved_by,
+                    "comment": approval.comment,
+                },
+                "remediation_executed": False,
+                "recovery_status": "NOT_RECOVERED",
                 "execution": execution_result,
-                "recovery_status": recovery_status,
-                "verification": recovery_result,
+                "workflow": (
+                    failed_workflow.model_dump()
+                ),
+                "lifecycle": (
+                    lifecycle.lifecycle.model_dump()
+                ),
             }
 
-        except Exception as exc:
+        # -----------------------------------------------------
+        # Verification
+        # -----------------------------------------------------
+
+        lifecycle.transition(
+            "VERIFYING",
+            message=(
+                "Remediation executed. "
+                "Verification started."
+            ),
+        )
+
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+            workflow=workflow,
+            approval_status="APPROVED",
+        )
+
+        verification_result = (
+            self.remediation_agent.verify(
+                service=incident.service,
+                namespace=incident.namespace,
+            )
+        )
+
+        # verify() returns:
+        #
+        # {
+        #     "success": True,
+        #     "data": {
+        #         "recovery_status": "RECOVERED"
+        #     }
+        # }
+        #
+        # Therefore recovery_status must be extracted from
+        # the nested "data" object.
+
+        verification_data = (
+            verification_result.get("data", {})
+        )
+
+        recovery_status = verification_data.get(
+            "recovery_status"
+        )
+
+        # -----------------------------------------------------
+        # Lifecycle outcome
+        # -----------------------------------------------------
+
+        if recovery_status == "RECOVERED":
+            lifecycle.transition(
+                "RECOVERED",
+                message="Service recovered successfully.",
+            )
+        else:
             lifecycle.transition(
                 "FAILED",
-                f"Remediation execution failed: {exc}",
+                message="Service did not recover.",
             )
 
-            workflow = workflow.model_copy(
-                update={
-                    "stage": "completed",
-                    "approval_required": False,
-                    "remediation_executed": False,
-                    "recovery_status": "FAILED",
-                }
-            )
+        # -----------------------------------------------------
+        # Final workflow state
+        # -----------------------------------------------------
 
-            self._workflows[incident_id] = workflow
+        final_workflow = workflow.model_copy(
+            update={
+                "stage": "completed",
+                "approval_required": False,
+                "remediation_executed": True,
+                "recovery_status": recovery_status,
+            }
+        )
 
-            self._persist_incident(
-                incident=incident,
-                lifecycle=lifecycle,
-                workflow=workflow,
-                approval_status="APPROVED",
-                recovery_status="FAILED",
-            )
+        self._workflows[
+            incident_id
+        ] = final_workflow
 
-            raise
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+            workflow=final_workflow,
+            approval_status="APPROVED",
+            recovery_status=recovery_status,
+        )
+
+        # -----------------------------------------------------
+        # Final API result
+        # -----------------------------------------------------
+
+        return {
+            "success": recovery_status == "RECOVERED",
+            "status": recovery_status,
+            "incident_id": incident_id,
+            "approval": {
+                "approved": True,
+                "approved_by": approval.approved_by,
+                "comment": approval.comment,
+            },
+            "remediation_executed": True,
+            "recovery_status": recovery_status,
+            "execution": execution_result,
+            "verification": verification_result,
+            "workflow": (
+                final_workflow.model_dump()
+            ),
+            "lifecycle": (
+                lifecycle.lifecycle.model_dump()
+            ),
+        }
