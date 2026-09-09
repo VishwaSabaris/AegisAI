@@ -5,12 +5,14 @@ from backend.app.models.evidence import (
     KubernetesEventsEvidence,
     PodLogsEvidence,
     PodStatusEvidence,
+    ServiceDependencyEvidence,
 )
 from backend.app.models.incident import Incident, IncidentAnalysis
 from backend.app.tools.kubernetes import (
     get_kubernetes_events,
     get_pod_logs,
     get_pod_status,
+    get_service_dependency,
 )
 from backend.app.tools.registry import ToolRegistry
 
@@ -58,6 +60,17 @@ class InvestigationAgent:
             requires_approval=False,
         )
 
+        self.registry.register(
+            name="get_service_dependency",
+            function=get_service_dependency,
+            description=(
+                "Inspect a Kubernetes Service dependency and determine "
+                "whether it exists and exposes active endpoints."
+            ),
+            permission="read_only",
+            requires_approval=False,
+        )
+
     def collect_evidence(
         self,
         incident: Incident,
@@ -81,6 +94,12 @@ class InvestigationAgent:
         events_result = self.registry.call(
             "get_kubernetes_events",
             service=incident.service,
+            namespace=incident.namespace,
+        )
+
+        dependency_result = self.registry.call(
+            "get_service_dependency",
+            dependency="postgres-service",
             namespace=incident.namespace,
         )
 
@@ -110,10 +129,18 @@ class InvestigationAgent:
                 ],
             )
 
+        service_dependency = None
+
+        if dependency_result["success"]:
+            service_dependency = ServiceDependencyEvidence.model_validate(
+                dependency_result["data"]
+            )
+
         return InvestigationEvidence(
             pod_status=pod_status,
             pod_logs=pod_logs,
             kubernetes_events=kubernetes_events,
+            service_dependency=service_dependency,
         )
 
     def investigate(

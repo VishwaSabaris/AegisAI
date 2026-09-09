@@ -39,6 +39,19 @@ IMPORTANT DISTINCTION:
 
 Investigation evidence represents observed infrastructure facts.
 
+This includes:
+
+- Pod status
+- Pod readiness
+- Restart counts
+- Container state
+- Application logs
+- Kubernetes events
+- Kubernetes Service existence
+- Kubernetes Service ClusterIP
+- Kubernetes Service ports
+- Kubernetes Service endpoints
+
 Retrieved knowledge represents operational guidance such as runbooks.
 Retrieved knowledge is NOT proof that a particular infrastructure
 condition exists.
@@ -100,6 +113,8 @@ Rules:
     machine-readable identifiers defined above.
 11. Prefer remediation guidance supported by the retrieved runbook when
     it is relevant to the incident.
+12. If a Kubernetes Service dependency is observed to be missing,
+    explicitly consider that fact when determining the root cause.
 """
 
 
@@ -198,6 +213,40 @@ def _build_observed_evidence(
                 f"{event.reason}: {event.message}"
             )
 
+    if evidence.service_dependency is not None:
+        dependency = evidence.service_dependency
+
+        observed.append(
+            f"Kubernetes Service {dependency.dependency} "
+            f"exists: {dependency.exists}."
+        )
+
+        if dependency.cluster_ip:
+            observed.append(
+                f"Kubernetes Service "
+                f"{dependency.dependency} ClusterIP: "
+                f"{dependency.cluster_ip}."
+            )
+
+        if dependency.ports:
+            observed.append(
+                f"Kubernetes Service "
+                f"{dependency.dependency} exposes ports: "
+                f"{', '.join(dependency.ports)}."
+            )
+
+        if dependency.endpoints:
+            observed.append(
+                f"Kubernetes Service "
+                f"{dependency.dependency} has endpoints: "
+                f"{', '.join(dependency.endpoints)}."
+            )
+        else:
+            observed.append(
+                f"Kubernetes Service "
+                f"{dependency.dependency} has no active endpoints."
+            )
+
     return observed
 
 
@@ -255,6 +304,10 @@ Important:
 - Do not treat the knowledge-base content as direct evidence.
 - Do not invent infrastructure facts from the runbook.
 - Base the root cause primarily on the observed investigation evidence.
+- Kubernetes Service existence and endpoint information are direct
+  observed infrastructure evidence.
+- If a required Kubernetes Service is observed to be missing, explicitly
+  consider that missing Service as a likely root-cause factor.
 - Use the runbook to identify relevant checks and remediation guidance.
 - If the runbook recommends checking something that was not observed,
   put that check in next_checks.

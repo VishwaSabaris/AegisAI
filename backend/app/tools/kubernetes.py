@@ -61,6 +61,99 @@ def _find_pod(
     return pods.items[0]
 
 
+def get_service_dependency(
+    dependency: str,
+    namespace: str = "default",
+) -> dict[str, Any]:
+    """
+    Read-only Kubernetes Service dependency inspection tool.
+
+    Checks whether a named Kubernetes Service exists and
+    returns its network and endpoint information.
+    """
+
+    try:
+        api = _load_kubernetes_config()
+
+        try:
+            service = api.read_namespaced_service(
+                name=dependency,
+                namespace=namespace,
+            )
+        except client.exceptions.ApiException as error:
+            if error.status == 404:
+                return {
+                    "success": True,
+                    "data": {
+                        "dependency": dependency,
+                        "namespace": namespace,
+                        "exists": False,
+                        "cluster_ip": None,
+                        "ports": [],
+                        "endpoints": [],
+                    },
+                }
+
+            raise
+
+        ports = []
+
+        if service.spec.ports:
+            for port in service.spec.ports:
+                protocol = port.protocol or "TCP"
+
+                if port.name:
+                    ports.append(
+                        f"{port.name}:{port.port}/{protocol}"
+                    )
+                else:
+                    ports.append(
+                        f"{port.port}/{protocol}"
+                    )
+
+        endpoints = []
+
+        try:
+            endpoint = api.read_namespaced_endpoints(
+                name=dependency,
+                namespace=namespace,
+            )
+
+            if endpoint.subsets:
+                for subset in endpoint.subsets:
+                    addresses = subset.addresses or []
+
+                    for address in addresses:
+                        if address.ip:
+                            endpoints.append(
+                                address.ip
+                            )
+
+        except client.exceptions.ApiException as error:
+            if error.status != 404:
+                raise
+
+        return {
+            "success": True,
+            "data": {
+                "dependency": dependency,
+                "namespace": namespace,
+                "exists": True,
+                "cluster_ip": service.spec.cluster_ip,
+                "ports": ports,
+                "endpoints": endpoints,
+            },
+        }
+
+    except Exception as error:
+        return {
+            "success": False,
+            "dependency": dependency,
+            "namespace": namespace,
+            "error": str(error),
+        }
+
+
 def _normalize_logs(
     logs: Any,
 ) -> list[str]:
@@ -824,12 +917,13 @@ def verify_deployment(
             )
 
         pod_result = {
-           **(
-               current_state
-               if "current_state" in locals()
-               else initial_state
-           ),
+            **(
+                current_state
+                if "current_state" in locals()
+                else initial_state
+            ),
         }
+
         return {
             "success": True,
             "data": {
