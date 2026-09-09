@@ -18,6 +18,11 @@ INVESTIGATION_DURATION_SECONDS = Histogram(
     "Time spent investigating an incident.",
 )
 
+INCIDENT_PROCESSING_DURATION_SECONDS = Histogram(
+    "aegisai_incident_processing_duration_seconds",
+    "Time spent processing an incident through the AegisAI workflow.",
+)
+
 LLM_INFERENCE_DURATION_SECONDS = Histogram(
     "aegisai_llm_inference_duration_seconds",
     "Time spent waiting for local LLM inference.",

@@ -1,3 +1,4 @@
+import time
 from typing import cast
 
 from backend.app.agents.investigation import InvestigationAgent
@@ -25,6 +26,10 @@ from backend.app.repositories.incident_repository import (
 )
 from backend.app.services.lifecycle import (
     IncidentLifecycleManager,
+)
+from backend.app.services.metrics import (
+    INCIDENTS_TOTAL,
+    INCIDENT_PROCESSING_DURATION_SECONDS,
 )
 
 
@@ -532,103 +537,124 @@ class IncidentOrchestrator:
         automatically when approval is required.
         """
 
-        lifecycle = self._get_or_create_lifecycle(
-            incident
-        )
+        start_time = time.perf_counter()
 
-        self._persist_incident(
-            incident=incident,
-            lifecycle=lifecycle,
-        )
-
-        lifecycle.transition(
-            "INVESTIGATING",
-            message="Investigation started.",
-        )
-
-        self._persist_incident(
-            incident=incident,
-            lifecycle=lifecycle,
-        )
-
-        analysis = (
-            self.investigation_agent.investigate(
+        try:
+            lifecycle = self._get_or_create_lifecycle(
                 incident
             )
-        )
 
-        lifecycle.transition(
-            "ANALYZED",
-            message="Investigation completed.",
-        )
-
-        self._persist_incident(
-            incident=incident,
-            lifecycle=lifecycle,
-        )
-
-        remediation_request = (
-            self._build_remediation_request(
+            self._persist_incident(
                 incident=incident,
-                analysis=analysis,
+                lifecycle=lifecycle,
             )
-        )
 
-        self._remediation_requests[
-            incident.incident_id
-        ] = remediation_request
-
-        risk_decision = (
-            self.remediation_agent.evaluate(
-                remediation_request
-            )
-        )
-
-        analysis = analysis.model_copy(
-            update={
-                "remediation": RemediationProposal(
-                    action=remediation_request.action,
-                    risk=risk_decision.risk,
-                    requires_approval=(
-                        risk_decision.requires_approval
-                    ),
-                )
-            }
-        )
-
-        workflow = IncidentWorkflowResult(
-            stage="remediation_evaluation",
-            incident=incident.service,
-            analysis=analysis,
-            risk_decision=risk_decision,
-            approval_required=(
-                risk_decision.requires_approval
-            ),
-            remediation_executed=False,
-            recovery_status=None,
-        )
-
-        self._persist_incident(
-            incident=incident,
-            lifecycle=lifecycle,
-            workflow=workflow,
-        )
-
-        if risk_decision.requires_approval:
             lifecycle.transition(
-                "AWAITING_APPROVAL",
-                message=(
-                    "Remediation requires explicit "
-                    "human approval."
-                ),
+                "INVESTIGATING",
+                message="Investigation started.",
             )
 
-            workflow = workflow.model_copy(
+            self._persist_incident(
+                incident=incident,
+                lifecycle=lifecycle,
+            )
+
+            analysis = (
+                self.investigation_agent.investigate(
+                    incident
+                )
+            )
+
+            INCIDENTS_TOTAL.labels(
+                service=incident.service,
+                severity=analysis.severity,
+            ).inc()
+
+            lifecycle.transition(
+                "ANALYZED",
+                message="Investigation completed.",
+            )
+
+            self._persist_incident(
+                incident=incident,
+                lifecycle=lifecycle,
+            )
+
+            remediation_request = (
+                self._build_remediation_request(
+                    incident=incident,
+                    analysis=analysis,
+                )
+            )
+
+            self._remediation_requests[
+                incident.incident_id
+            ] = remediation_request
+
+            risk_decision = (
+                self.remediation_agent.evaluate(
+                    remediation_request
+                )
+            )
+
+            analysis = analysis.model_copy(
                 update={
-                    "stage": "approval_required",
-                    "approval_required": True,
+                    "remediation": RemediationProposal(
+                        action=remediation_request.action,
+                        risk=risk_decision.risk,
+                        requires_approval=(
+                            risk_decision.requires_approval
+                        ),
+                    )
                 }
             )
+
+            workflow = IncidentWorkflowResult(
+                stage="remediation_evaluation",
+                incident=incident.service,
+                analysis=analysis,
+                risk_decision=risk_decision,
+                approval_required=(
+                    risk_decision.requires_approval
+                ),
+                remediation_executed=False,
+                recovery_status=None,
+            )
+
+            self._persist_incident(
+                incident=incident,
+                lifecycle=lifecycle,
+                workflow=workflow,
+            )
+
+            if risk_decision.requires_approval:
+                lifecycle.transition(
+                    "AWAITING_APPROVAL",
+                    message=(
+                        "Remediation requires explicit "
+                        "human approval."
+                    ),
+                )
+
+                workflow = workflow.model_copy(
+                    update={
+                        "stage": "approval_required",
+                        "approval_required": True,
+                    }
+                )
+
+                self._workflows[
+                    incident.incident_id
+                ] = workflow
+
+                self._persist_incident(
+                    incident=incident,
+                    lifecycle=lifecycle,
+                    workflow=workflow,
+                    approval_status="PENDING",
+                )
+
+                return workflow
 
             self._workflows[
                 incident.incident_id
@@ -638,22 +664,15 @@ class IncidentOrchestrator:
                 incident=incident,
                 lifecycle=lifecycle,
                 workflow=workflow,
-                approval_status="PENDING",
             )
 
             return workflow
 
-        self._workflows[
-            incident.incident_id
-        ] = workflow
-
-        self._persist_incident(
-            incident=incident,
-            lifecycle=lifecycle,
-            workflow=workflow,
-        )
-
-        return workflow
+        finally:
+            elapsed = time.perf_counter() - start_time
+            INCIDENT_PROCESSING_DURATION_SECONDS.observe(
+                elapsed
+            )
 
     # =========================================================
     # Approval / Execution
