@@ -21,7 +21,10 @@ router = APIRouter(
 
 class CreateIncidentRequest(BaseModel):
     service: str = Field(..., min_length=1)
-    namespace: str = Field(default="default", min_length=1)
+    namespace: str = Field(
+        default="default",
+        min_length=1,
+    )
     environment: str = Field(..., min_length=1)
     status: str = Field(..., min_length=1)
     recent_log: str = Field(..., min_length=1)
@@ -176,6 +179,25 @@ def list_incidents(
             }
             for record in records
         ],
+    }
+
+
+@router.get("/dashboard/summary")
+def get_dashboard_summary(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Return aggregate incident statistics for the
+    AegisAI dashboard.
+    """
+
+    repository = IncidentRepository(db)
+
+    summary = repository.get_dashboard_summary()
+
+    return {
+        "success": True,
+        "summary": summary,
     }
 
 

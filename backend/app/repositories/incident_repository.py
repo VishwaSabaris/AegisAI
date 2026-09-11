@@ -248,6 +248,168 @@ class IncidentRepository:
         )
 
     # =========================================================
+    # DASHBOARD SUMMARY
+    # =========================================================
+
+    def get_dashboard_summary(
+        self,
+    ) -> dict:
+        """
+        Retrieve aggregate incident statistics
+        required by the dashboard.
+
+        Returns:
+            Dictionary containing:
+
+            - total_incidents
+            - active_incidents
+            - recovered_incidents
+            - failed_incidents
+            - pending_approval
+            - severity_distribution
+            - lifecycle_distribution
+        """
+
+        # -----------------------------------------------------
+        # Total incidents
+        # -----------------------------------------------------
+
+        total_incidents = (
+            self.db.query(IncidentRecord)
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # Active incidents
+        #
+        # These states represent incidents that have not
+        # reached a terminal state yet.
+        # -----------------------------------------------------
+
+        active_states = [
+            "DETECTED",
+            "INVESTIGATING",
+            "ANALYZED",
+            "AWAITING_APPROVAL",
+            "APPROVED",
+            "EXECUTING",
+            "VERIFYING",
+        ]
+
+        active_incidents = (
+            self.db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.lifecycle_state.in_(
+                    active_states
+                )
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # Recovered incidents
+        # -----------------------------------------------------
+
+        recovered_incidents = (
+            self.db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.lifecycle_state
+                == "RECOVERED"
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # Failed incidents
+        # -----------------------------------------------------
+
+        failed_incidents = (
+            self.db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.lifecycle_state
+                == "FAILED"
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # Incidents waiting for human approval
+        # -----------------------------------------------------
+
+        pending_approval = (
+            self.db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.lifecycle_state
+                == "AWAITING_APPROVAL"
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # Severity distribution
+        #
+        # Ignore incidents that have not been analyzed yet
+        # and therefore have no severity value.
+        # -----------------------------------------------------
+
+        severity_rows = (
+            self.db.query(
+                IncidentRecord.severity,
+            )
+            .filter(
+                IncidentRecord.severity.isnot(None)
+            )
+            .all()
+        )
+
+        severity_distribution: dict[str, int] = {}
+
+        for (severity,) in severity_rows:
+            severity_distribution[severity] = (
+                severity_distribution.get(
+                    severity,
+                    0,
+                )
+                + 1
+            )
+
+        # -----------------------------------------------------
+        # Lifecycle distribution
+        # -----------------------------------------------------
+
+        lifecycle_rows = (
+            self.db.query(
+                IncidentRecord.lifecycle_state,
+            )
+            .all()
+        )
+
+        lifecycle_distribution: dict[str, int] = {}
+
+        for (lifecycle_state,) in lifecycle_rows:
+            lifecycle_distribution[lifecycle_state] = (
+                lifecycle_distribution.get(
+                    lifecycle_state,
+                    0,
+                )
+                + 1
+            )
+
+        # -----------------------------------------------------
+        # Return dashboard summary
+        # -----------------------------------------------------
+
+        return {
+            "total_incidents": total_incidents,
+            "active_incidents": active_incidents,
+            "recovered_incidents": recovered_incidents,
+            "failed_incidents": failed_incidents,
+            "pending_approval": pending_approval,
+            "severity_distribution": severity_distribution,
+            "lifecycle_distribution": lifecycle_distribution,
+        }
+
+    # =========================================================
     # READ - BY LIFECYCLE
     # =========================================================
 

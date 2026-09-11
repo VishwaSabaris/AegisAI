@@ -224,6 +224,89 @@ def test_list_incidents_with_pagination_and_filters():
     )
 
 
+def test_dashboard_summary():
+    fake_repository = MagicMock()
+
+    fake_repository.get_dashboard_summary.return_value = {
+        "total_incidents": 400,
+        "active_incidents": 140,
+        "recovered_incidents": 0,
+        "failed_incidents": 134,
+        "pending_approval": 130,
+        "severity_distribution": {
+            "high": 359,
+            "critical": 25,
+        },
+        "lifecycle_distribution": {
+            "AWAITING_APPROVAL": 130,
+            "DETECTED": 6,
+            "FAILED": 134,
+            "REJECTED": 126,
+            "INVESTIGATING": 4,
+        },
+    }
+
+    with patch(
+        "backend.app.api.incidents.IncidentRepository",
+        return_value=fake_repository,
+    ):
+        response = client.get(
+            "/incidents/dashboard/summary"
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["success"] is True
+
+    assert data["summary"] == {
+        "total_incidents": 400,
+        "active_incidents": 140,
+        "recovered_incidents": 0,
+        "failed_incidents": 134,
+        "pending_approval": 130,
+        "severity_distribution": {
+            "high": 359,
+            "critical": 25,
+        },
+        "lifecycle_distribution": {
+            "AWAITING_APPROVAL": 130,
+            "DETECTED": 6,
+            "FAILED": 134,
+            "REJECTED": 126,
+            "INVESTIGATING": 4,
+        },
+    }
+
+    fake_repository.get_dashboard_summary.assert_called_once_with()
+
+
+def test_dashboard_summary_route_is_not_treated_as_incident_id():
+    fake_repository = MagicMock()
+
+    fake_repository.get_dashboard_summary.return_value = {
+        "total_incidents": 0,
+        "active_incidents": 0,
+        "recovered_incidents": 0,
+        "failed_incidents": 0,
+        "pending_approval": 0,
+        "severity_distribution": {},
+        "lifecycle_distribution": {},
+    }
+
+    with patch(
+        "backend.app.api.incidents.IncidentRepository",
+        return_value=fake_repository,
+    ):
+        response = client.get(
+            "/incidents/dashboard/summary"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
 def test_list_incidents_invalid_page():
     response = client.get(
         "/incidents?page=0"
