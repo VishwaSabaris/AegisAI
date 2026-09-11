@@ -1,6 +1,7 @@
+from datetime import datetime, timedelta, timezone
 from math import ceil
 
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import IncidentRecord
@@ -408,6 +409,95 @@ class IncidentRepository:
             "severity_distribution": severity_distribution,
             "lifecycle_distribution": lifecycle_distribution,
         }
+
+    # =========================================================
+    # DASHBOARD - INCIDENT TREND
+    # =========================================================
+
+    def get_incident_trend(
+        self,
+        days: int = 7,
+    ) -> list[dict[str, int | str]]:
+        """
+        Retrieve daily incident counts for the requested
+        number of calendar days.
+
+        Days with no incidents are included with a count of 0.
+
+        Results are returned in chronological order.
+        """
+
+        if days < 1:
+            raise ValueError(
+                "days must be greater than or equal to 1."
+            )
+
+        now = datetime.now(timezone.utc)
+
+        start_date = (
+            now.date()
+            - timedelta(days=days - 1)
+        )
+
+        start_datetime = datetime.combine(
+            start_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+
+        rows = (
+            self.db.query(
+                func.date(
+                    IncidentRecord.created_at
+                ).label(
+                    "incident_date"
+                ),
+                func.count(
+                    IncidentRecord.id
+                ).label(
+                    "incident_count"
+                ),
+            )
+            .filter(
+                IncidentRecord.created_at
+                >= start_datetime
+            )
+            .group_by(
+                func.date(
+                    IncidentRecord.created_at
+                )
+            )
+            .order_by(
+                func.date(
+                    IncidentRecord.created_at
+                )
+            )
+            .all()
+        )
+
+        counts = {
+            incident_date.isoformat(): int(
+                incident_count
+            )
+            for incident_date, incident_count in rows
+        }
+
+        return [
+            {
+                "date": (
+                    start_date
+                    + timedelta(days=offset)
+                ).isoformat(),
+                "count": counts.get(
+                    (
+                        start_date
+                        + timedelta(days=offset)
+                    ).isoformat(),
+                    0,
+                ),
+            }
+            for offset in range(days)
+        ]
 
     # =========================================================
     # READ - BY LIFECYCLE

@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
-from backend.app.models.dashboard import DashboardSummaryResponse
+from backend.app.models.dashboard import (
+    DashboardSummaryResponse,
+    IncidentTrendResponse,
+)
 from backend.app.models.incident import Incident
 from backend.app.models.remediation import RemediationApproval
 from backend.app.repositories.incident_repository import (
@@ -202,6 +205,42 @@ def get_dashboard_summary(
     return DashboardSummaryResponse(
         success=True,
         summary=summary,
+    )
+
+
+@router.get(
+    "/dashboard/trend",
+    response_model=IncidentTrendResponse,
+)
+def get_incident_trend(
+    days: int = Query(
+        default=7,
+        ge=1,
+        le=365,
+        description=(
+            "Number of calendar days to include "
+            "in the incident trend."
+        ),
+    ),
+    db: Session = Depends(get_db),
+) -> IncidentTrendResponse:
+    """
+    Return daily incident counts for the requested
+    number of calendar days.
+    """
+
+    repository = IncidentRepository(db)
+
+    trend = repository.get_incident_trend(
+        days=days,
+    )
+
+    return IncidentTrendResponse(
+        success=True,
+        trend={
+            "days": days,
+            "trend": trend,
+        },
     )
 
 
