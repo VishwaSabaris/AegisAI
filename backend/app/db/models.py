@@ -23,6 +23,13 @@ class IncidentRecord(Base):
         index=True,
     )
 
+    grafana_fingerprint: Mapped[str | None] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
+
     service: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

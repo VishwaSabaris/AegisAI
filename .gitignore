@@ -48,3 +48,10 @@ dist/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local backups / temporary files
+*.sql
+*.before-async
+
+# Local infrastructure configuration
+grafana-smtp-values.yaml

@@ -1,3 +1,6 @@
+from math import ceil
+
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import IncidentRecord
@@ -22,13 +25,18 @@ class IncidentRepository:
     def create(
         self,
         incident: Incident,
+        grafana_fingerprint: str | None = None,
     ) -> IncidentRecord:
         """
         Create and persist a new incident.
+
+        A Grafana fingerprint can be stored when the
+        incident originated from a Grafana alert.
         """
 
         record = IncidentRecord(
             incident_id=incident.incident_id,
+            grafana_fingerprint=grafana_fingerprint,
             service=incident.service,
             namespace=incident.namespace,
             environment=incident.environment,
@@ -70,6 +78,74 @@ class IncidentRepository:
         )
 
     # =========================================================
+    # READ - GRAFANA FINGERPRINT
+    # =========================================================
+
+    def get_by_grafana_fingerprint(
+        self,
+        grafana_fingerprint: str,
+    ) -> IncidentRecord | None:
+        """
+        Retrieve an incident created from a specific
+        Grafana alert fingerprint.
+        """
+
+        return (
+            self.db.query(IncidentRecord)
+            .filter(
+                IncidentRecord.grafana_fingerprint
+                == grafana_fingerprint
+            )
+            .first()
+        )
+
+    # =========================================================
+    # READ - ACTIVE GRAFANA INCIDENT
+    # =========================================================
+
+    def get_active_grafana_incident(
+        self,
+        service: str,
+        namespace: str,
+    ) -> IncidentRecord | None:
+        """
+        Retrieve the newest active Grafana-originated
+        incident for the specified service and namespace.
+
+        This provides a second deduplication layer when
+        Grafana sends a different fingerprint for what is
+        still the same active operational problem.
+        """
+
+        active_states = [
+            "DETECTED",
+            "INVESTIGATING",
+            "ANALYZED",
+            "AWAITING_APPROVAL",
+            "APPROVED",
+            "EXECUTING",
+            "VERIFYING",
+        ]
+
+        return (
+            self.db.query(IncidentRecord)
+            .filter(
+                and_(
+                    IncidentRecord.grafana_fingerprint.isnot(None),
+                    IncidentRecord.service == service,
+                    IncidentRecord.namespace == namespace,
+                    IncidentRecord.lifecycle_state.in_(
+                        active_states
+                    ),
+                )
+            )
+            .order_by(
+                IncidentRecord.created_at.desc()
+            )
+            .first()
+        )
+
+    # =========================================================
     # READ - ALL INCIDENTS
     # =========================================================
 
@@ -88,6 +164,87 @@ class IncidentRepository:
                 IncidentRecord.id.desc()
             )
             .all()
+        )
+
+    # =========================================================
+    # READ - PAGINATED / FILTERED INCIDENTS
+    # =========================================================
+
+    def get_paginated(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        service: str | None = None,
+        namespace: str | None = None,
+        lifecycle_state: str | None = None,
+    ) -> tuple[list[IncidentRecord], int, int]:
+        """
+        Retrieve incidents using pagination and optional filters.
+
+        Returns:
+            (
+                records,
+                total_count,
+                total_pages,
+            )
+
+        Results are ordered newest first.
+        """
+
+        query = self.db.query(IncidentRecord)
+
+        # -----------------------------------------------------
+        # Optional filters
+        # -----------------------------------------------------
+
+        if service is not None:
+            query = query.filter(
+                IncidentRecord.service == service
+            )
+
+        if namespace is not None:
+            query = query.filter(
+                IncidentRecord.namespace == namespace
+            )
+
+        if lifecycle_state is not None:
+            query = query.filter(
+                IncidentRecord.lifecycle_state
+                == lifecycle_state
+            )
+
+        # -----------------------------------------------------
+        # Count matching records before pagination
+        # -----------------------------------------------------
+
+        total_count = query.count()
+
+        total_pages = (
+            ceil(total_count / page_size)
+            if total_count > 0
+            else 0
+        )
+
+        # -----------------------------------------------------
+        # Pagination
+        # -----------------------------------------------------
+
+        offset = (page - 1) * page_size
+
+        records = (
+            query
+            .order_by(
+                IncidentRecord.id.desc()
+            )
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+
+        return (
+            records,
+            total_count,
+            total_pages,
         )
 
     # =========================================================

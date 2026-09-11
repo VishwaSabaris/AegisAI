@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -79,21 +79,66 @@ def create_incident(
 
 @router.get("")
 def list_incidents(
+    page: int = Query(
+        default=1,
+        ge=1,
+        description="Page number starting from 1.",
+    ),
+    page_size: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Number of incidents per page.",
+    ),
+    service: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Filter incidents by service.",
+    ),
+    namespace: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Filter incidents by Kubernetes namespace.",
+    ),
+    lifecycle_state: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Filter incidents by lifecycle state.",
+    ),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """
-    Return all persisted incidents.
+    Return persisted incidents using database-level
+    pagination and optional filters.
 
-    Database access is isolated through the repository.
+    Results are returned newest first.
     """
 
     repository = IncidentRepository(db)
 
-    records = repository.get_all()
+    (
+        records,
+        total_count,
+        total_pages,
+    ) = repository.get_paginated(
+        page=page,
+        page_size=page_size,
+        service=service,
+        namespace=namespace,
+        lifecycle_state=lifecycle_state,
+    )
 
     return {
         "success": True,
-        "count": len(records),
+        "page": page,
+        "page_size": page_size,
+        "total": total_count,
+        "total_pages": total_pages,
+        "filters": {
+            "service": service,
+            "namespace": namespace,
+            "lifecycle_state": lifecycle_state,
+        },
         "incidents": [
             {
                 "incident_id": record.incident_id,

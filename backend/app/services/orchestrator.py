@@ -373,6 +373,34 @@ class IncidentOrchestrator:
             incident.incident_id
         ]
 
+    def register_incident(
+        self,
+        incident: Incident,
+        grafana_fingerprint: str | None = None,
+    ) -> IncidentLifecycle:
+        """
+        Register a newly detected incident without starting
+        investigation.
+
+        This method is intentionally lightweight so webhook
+        handlers can persist the incident and return quickly.
+
+        The expensive investigation and LLM processing are
+        performed later by process_incident().
+        """
+
+        lifecycle = self._get_or_create_lifecycle(
+            incident
+        )
+
+        self._persist_incident(
+            incident=incident,
+            lifecycle=lifecycle,
+            grafana_fingerprint=grafana_fingerprint,
+        )
+
+        return lifecycle.lifecycle
+
     def get_lifecycle(
         self,
         incident_id: str,
@@ -426,12 +454,17 @@ class IncidentOrchestrator:
         workflow: IncidentWorkflowResult | None = None,
         approval_status: str | None = None,
         recovery_status: str | None = None,
+        grafana_fingerprint: str | None = None,
     ) -> None:
         """
         Persist the current incident lifecycle and workflow state.
 
         The analysis evidence and next checks are persisted so
         that they can be restored after an orchestrator restart.
+
+        When a new incident originates from Grafana, its alert
+        fingerprint is persisted so repeated Grafana notifications
+        can be identified as the same incident.
         """
 
         db = SessionLocal()
@@ -445,7 +478,8 @@ class IncidentOrchestrator:
 
             if record is None:
                 record = repository.create(
-                    incident
+                    incident,
+                    grafana_fingerprint=grafana_fingerprint,
                 )
 
             lifecycle_state = lifecycle.lifecycle
@@ -528,6 +562,7 @@ class IncidentOrchestrator:
     def process_incident(
         self,
         incident: Incident,
+        grafana_fingerprint: str | None = None,
     ) -> IncidentWorkflowResult:
         """
         Process a new incident through investigation,
@@ -535,6 +570,9 @@ class IncidentOrchestrator:
 
         Infrastructure-changing remediation is never executed
         automatically when approval is required.
+
+        When provided, the Grafana alert fingerprint is persisted
+        with the incident for idempotent webhook processing.
         """
 
         start_time = time.perf_counter()
@@ -547,6 +585,7 @@ class IncidentOrchestrator:
             self._persist_incident(
                 incident=incident,
                 lifecycle=lifecycle,
+                grafana_fingerprint=grafana_fingerprint,
             )
 
             lifecycle.transition(
