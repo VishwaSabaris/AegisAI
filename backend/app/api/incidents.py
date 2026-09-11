@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
+from backend.app.models.dashboard import DashboardSummaryResponse
 from backend.app.models.incident import Incident
 from backend.app.models.remediation import RemediationApproval
 from backend.app.repositories.incident_repository import (
@@ -182,10 +183,13 @@ def list_incidents(
     }
 
 
-@router.get("/dashboard/summary")
+@router.get(
+    "/dashboard/summary",
+    response_model=DashboardSummaryResponse,
+)
 def get_dashboard_summary(
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
+) -> DashboardSummaryResponse:
     """
     Return aggregate incident statistics for the
     AegisAI dashboard.
@@ -195,10 +199,10 @@ def get_dashboard_summary(
 
     summary = repository.get_dashboard_summary()
 
-    return {
-        "success": True,
-        "summary": summary,
-    }
+    return DashboardSummaryResponse(
+        success=True,
+        summary=summary,
+    )
 
 
 @router.get("/{incident_id}")

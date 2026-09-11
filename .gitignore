@@ -34,7 +34,7 @@ logs/
 *.gguf
 *.safetensors
 *.bin
-models/
+/models/
 model_cache/
 
 # Generated data
