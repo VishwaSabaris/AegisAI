@@ -4,6 +4,7 @@ from typing import cast
 from backend.app.agents.investigation import InvestigationAgent
 from backend.app.agents.remediation import RemediationAgent
 from backend.app.core.database import SessionLocal
+from backend.app.db.models import IncidentLifecycleHistory
 from backend.app.models.incident import (
     Incident,
     IncidentAnalysis,
@@ -465,6 +466,9 @@ class IncidentOrchestrator:
         When a new incident originates from Grafana, its alert
         fingerprint is persisted so repeated Grafana notifications
         can be identified as the same incident.
+
+        Every actual lifecycle transition is also persisted in
+        incident_lifecycle_history.
         """
 
         db = SessionLocal()
@@ -476,6 +480,8 @@ class IncidentOrchestrator:
                 incident.incident_id
             )
 
+            is_new_record = record is None
+
             if record is None:
                 record = repository.create(
                     incident,
@@ -484,9 +490,15 @@ class IncidentOrchestrator:
 
             lifecycle_state = lifecycle.lifecycle
 
-            record.lifecycle_state = (
-                lifecycle_state.state
+            previous_state = (
+                None
+                if is_new_record
+                else record.lifecycle_state
             )
+
+            current_state = lifecycle_state.state
+
+            record.lifecycle_state = current_state
 
             record.previous_lifecycle_state = (
                 lifecycle_state.previous_state
@@ -522,6 +534,19 @@ class IncidentOrchestrator:
 
             if recovery_status is not None:
                 record.recovery_status = recovery_status
+
+            if (
+                previous_state != current_state
+                and lifecycle_state.message
+            ):
+                history = IncidentLifecycleHistory(
+                    incident_id=incident.incident_id,
+                    from_state=previous_state,
+                    to_state=current_state,
+                    message=lifecycle_state.message,
+                )
+
+                db.add(history)
 
             repository.update(record)
 
@@ -728,22 +753,60 @@ class IncidentOrchestrator:
 
         Existing analysis and remediation request are reused.
         The incident is not sent through investigation again.
+
+        If the runtime state is missing, the persisted incident
+        is rehydrated from PostgreSQL before continuing.
         """
 
         incident_id = incident.incident_id
+
+        # -----------------------------------------------------
+        # Runtime state / persistence recovery
+        # -----------------------------------------------------
 
         lifecycle = self._lifecycle_managers.get(
             incident_id
         )
 
+        workflow = self._workflows.get(
+            incident_id
+        )
+
+        if lifecycle is None or workflow is None:
+            db = SessionLocal()
+
+            try:
+                repository = IncidentRepository(db)
+
+                record = repository.get_by_incident_id(
+                    incident_id
+                )
+
+                if record is None:
+                    raise KeyError(
+                        f"No persisted incident found: {incident_id}"
+                    )
+
+                self._restore_incident(
+                    incident=incident,
+                    record=record,
+                )
+
+                lifecycle = self._lifecycle_managers.get(
+                    incident_id
+                )
+
+                workflow = self._workflows.get(
+                    incident_id
+                )
+
+            finally:
+                db.close()
+
         if lifecycle is None:
             raise KeyError(
                 f"No lifecycle found for incident: {incident_id}"
             )
-
-        workflow = self._workflows.get(
-            incident_id
-        )
 
         if workflow is None:
             raise KeyError(

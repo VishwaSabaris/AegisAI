@@ -543,9 +543,21 @@ def verify_deployment(
     namespace: str = "default",
     stability_seconds: int = 15,
     check_interval_seconds: int = 5,
+    rollout_timeout_seconds: int = 60,
 ) -> dict[str, Any]:
     """
     Perform application-aware Kubernetes recovery verification.
+
+    Verification has two phases:
+
+    Phase 1: Rollout readiness
+        Wait for the deployment to finish rolling out after
+        remediation. Kubernetes may temporarily report
+        ContainerCreating while the replacement pod starts.
+
+    Phase 2: Stability verification
+        Once the rollout is complete, verify that the new pod
+        remains healthy for the configured stability window.
 
     Verification checks:
 
@@ -580,34 +592,122 @@ def verify_deployment(
             deployment.spec.replicas or 0
         )
 
-        updated_replicas = (
-            deployment.status.updated_replicas or 0
-        )
-
-        available_replicas = (
-            deployment.status.available_replicas
-            or 0
-        )
-
-        ready_replicas = (
-            deployment.status.ready_replicas
-            or 0
-        )
-
-        observed_generation = (
-            deployment.status.observed_generation
-        )
-
         generation = deployment.metadata.generation
 
-        rollout_complete = (
-            observed_generation == generation
-            and updated_replicas
-            == desired_replicas
-            and available_replicas
-            == desired_replicas
-            and ready_replicas
-            == desired_replicas
+        rollout_start_time = time.monotonic()
+
+        rollout_complete = False
+
+        updated_replicas = 0
+        available_replicas = 0
+        ready_replicas = 0
+        observed_generation = None
+
+        rollout_pod_state = None
+
+        while True:
+            deployment = (
+                deployment_api.read_namespaced_deployment(
+                    name=service,
+                    namespace=namespace,
+                )
+            )
+
+            desired_replicas = (
+                deployment.spec.replicas or 0
+            )
+
+            updated_replicas = (
+                deployment.status.updated_replicas
+                or 0
+            )
+
+            available_replicas = (
+                deployment.status.available_replicas
+                or 0
+            )
+
+            ready_replicas = (
+                deployment.status.ready_replicas
+                or 0
+            )
+
+            observed_generation = (
+                deployment.status.observed_generation
+            )
+
+            generation = deployment.metadata.generation
+
+            rollout_complete = (
+                observed_generation == generation
+                and updated_replicas
+                == desired_replicas
+                and available_replicas
+                == desired_replicas
+                and ready_replicas
+                == desired_replicas
+            )
+
+            current_pods = (
+                pod_api.list_namespaced_pod(
+                    namespace=namespace,
+                    label_selector=f"app={service}",
+                )
+            )
+
+            if current_pods.items:
+                candidate_pods = sorted(
+                    current_pods.items,
+                    key=lambda item: (
+                        item.metadata.creation_timestamp
+                        or 0
+                    ),
+                    reverse=True,
+                )
+
+                rollout_pod = candidate_pods[0]
+
+                rollout_pod_state = _get_pod_state(
+                    rollout_pod
+                )
+
+                pod_ready = (
+                    rollout_pod_state["phase"]
+                    == "Running"
+                    and rollout_pod_state["ready"]
+                    and rollout_pod_state[
+                        "container_status"
+                    ]
+                    == "Running"
+                )
+
+                if rollout_complete and pod_ready:
+                    break
+
+            elapsed = (
+                time.monotonic()
+                - rollout_start_time
+            )
+
+            if elapsed >= rollout_timeout_seconds:
+                break
+
+            sleep_seconds = min(
+                check_interval_seconds,
+                max(
+                    0,
+                    rollout_timeout_seconds
+                    - elapsed,
+                ),
+            )
+
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+        rollout_observed_seconds = round(
+            time.monotonic()
+            - rollout_start_time,
+            2,
         )
 
         pods = pod_api.list_namespaced_pod(
@@ -641,11 +741,26 @@ def verify_deployment(
                         "required_seconds": stability_seconds,
                         "observed_seconds": 0,
                         "stable": False,
+                        "rollout_wait_seconds": (
+                            rollout_observed_seconds
+                        ),
+                        "rollout_timeout_seconds": (
+                            rollout_timeout_seconds
+                        ),
                     },
                 },
             }
 
-        pod = pods.items[0]
+        candidate_pods = sorted(
+            pods.items,
+            key=lambda item: (
+                item.metadata.creation_timestamp
+                or 0
+            ),
+            reverse=True,
+        )
+
+        pod = candidate_pods[0]
 
         initial_state = _get_pod_state(
             pod
@@ -702,13 +817,15 @@ def verify_deployment(
 
         stable = initial_kubernetes_health
 
-        start_time = time.monotonic()
+        stability_start_time = time.monotonic()
+
+        current_state = initial_state
 
         while (
             stable
             and (
                 time.monotonic()
-                - start_time
+                - stability_start_time
             )
             < stability_seconds
         ):
@@ -719,7 +836,7 @@ def verify_deployment(
                     stability_seconds
                     - (
                         time.monotonic()
-                        - start_time
+                        - stability_start_time
                     ),
                 ),
             )
@@ -740,7 +857,18 @@ def verify_deployment(
                 stable = False
                 break
 
-            current_pod = current_pods.items[0]
+            current_candidate_pods = sorted(
+                current_pods.items,
+                key=lambda item: (
+                    item.metadata.creation_timestamp
+                    or 0
+                ),
+                reverse=True,
+            )
+
+            current_pod = (
+                current_candidate_pods[0]
+            )
 
             current_state = _get_pod_state(
                 current_pod
@@ -750,7 +878,7 @@ def verify_deployment(
                 {
                     "elapsed_seconds": round(
                         time.monotonic()
-                        - start_time,
+                        - stability_start_time,
                         2,
                     ),
                     "pod": current_state,
@@ -839,7 +967,7 @@ def verify_deployment(
 
         observed_seconds = round(
             time.monotonic()
-            - start_time,
+            - stability_start_time,
             2,
         )
 
@@ -869,7 +997,8 @@ def verify_deployment(
 
             if not rollout_complete:
                 reasons.append(
-                    "deployment rollout is not complete"
+                    "deployment rollout did not complete "
+                    f"within {rollout_timeout_seconds} seconds"
                 )
 
             if initial_state["phase"] != "Running":
@@ -917,11 +1046,7 @@ def verify_deployment(
             )
 
         pod_result = {
-            **(
-                current_state
-                if "current_state" in locals()
-                else initial_state
-            ),
+            **current_state,
         }
 
         return {
@@ -947,6 +1072,12 @@ def verify_deployment(
                     "required_seconds": stability_seconds,
                     "observed_seconds": observed_seconds,
                     "stable": stable,
+                    "rollout_wait_seconds": (
+                        rollout_observed_seconds
+                    ),
+                    "rollout_timeout_seconds": (
+                        rollout_timeout_seconds
+                    ),
                     "samples": stability_samples,
                 },
             },
@@ -959,3 +1090,4 @@ def verify_deployment(
             "namespace": namespace,
             "error": str(error),
         }
+

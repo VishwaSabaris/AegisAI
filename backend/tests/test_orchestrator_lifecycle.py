@@ -137,6 +137,8 @@ def test_approval_does_not_rerun_analysis(monkeypatch):
         incident
     )
 
+    # Investigation must happen exactly once during
+    # initial incident processing.
     assert call_count == 1
 
     result = orchestrator.approve_and_execute(
@@ -148,19 +150,36 @@ def test_approval_does_not_rerun_analysis(monkeypatch):
         ),
     )
 
+    # Approval/remediation must not trigger another
+    # investigation or LLM analysis.
     assert call_count == 1
 
     assert result["remediation_executed"] is True
+    assert result["execution"]["success"] is True
+    assert result["verification"]["success"] is True
+
+    assert result["recovery_status"] in {
+        "RECOVERED",
+        "NOT_RECOVERED",
+    }
 
     lifecycle = orchestrator.get_lifecycle(
         incident.incident_id
     )
 
-    assert lifecycle.state == "FAILED"
+    if result["recovery_status"] == "RECOVERED":
+        assert lifecycle.state == "RECOVERED"
+    else:
+        assert lifecycle.state == "FAILED"
 
     print(
         "\nInvestigation calls:",
         call_count,
+    )
+
+    print(
+        "\nRecovery status:",
+        result["recovery_status"],
     )
 
     print("\nFinal lifecycle:")

@@ -4,7 +4,10 @@ from math import ceil
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
-from backend.app.db.models import IncidentRecord
+from backend.app.db.models import (
+    IncidentLifecycleHistory,
+    IncidentRecord,
+)
 from backend.app.models.incident import Incident
 
 
@@ -57,6 +60,34 @@ class IncidentRepository:
         except Exception:
             self.db.rollback()
             raise
+
+    def record_lifecycle_transition(
+        self,
+        incident_id: str,
+        from_state: str | None,
+        to_state: str,
+        message: str,
+    ) -> IncidentLifecycleHistory:
+        """
+        Persist one incident lifecycle transition.
+
+        The transition is stored independently from the
+        current lifecycle state so the complete incident
+        history can be reconstructed later.
+        """
+
+        history = IncidentLifecycleHistory(
+            incident_id=incident_id,
+            from_state=from_state,
+            to_state=to_state,
+            message=message,
+        )
+
+        self.db.add(history)
+        self.db.commit()
+        self.db.refresh(history)
+
+        return history
 
     # =========================================================
     # READ - SINGLE INCIDENT
@@ -498,6 +529,34 @@ class IncidentRepository:
             }
             for offset in range(days)
         ]
+
+    # =========================================================
+    # READ - LIFECYCLE HISTORY
+    # =========================================================
+
+    def get_lifecycle_history(
+        self,
+        incident_id: str,
+    ) -> list[IncidentLifecycleHistory]:
+        """
+        Retrieve the complete lifecycle history for an incident.
+
+        Transitions are returned in chronological order so the
+        caller can render the incident timeline directly.
+        """
+
+        return (
+            self.db.query(IncidentLifecycleHistory)
+            .filter(
+                IncidentLifecycleHistory.incident_id
+                == incident_id
+            )
+            .order_by(
+                IncidentLifecycleHistory.created_at.asc(),
+                IncidentLifecycleHistory.id.asc(),
+            )
+            .all()
+        )
 
     # =========================================================
     # READ - BY LIFECYCLE

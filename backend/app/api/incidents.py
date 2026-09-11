@@ -302,6 +302,51 @@ def get_incident(
         "updated_at": record.updated_at.isoformat(),
     }
 
+@router.get("/{incident_id}/timeline")
+def get_incident_timeline(
+    incident_id: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Return the persisted lifecycle timeline for an incident.
+
+    Timeline entries represent actual lifecycle transitions
+    recorded in PostgreSQL.
+    """
+
+    repository = IncidentRepository(db)
+
+    record = repository.get_by_incident_id(
+        incident_id
+    )
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident not found: {incident_id}",
+        )
+
+    history = repository.get_lifecycle_history(
+        incident_id
+    )
+
+    timeline = [
+        {
+            "id": entry.id,
+            "incident_id": entry.incident_id,
+            "from_state": entry.from_state,
+            "to_state": entry.to_state,
+            "message": entry.message,
+            "created_at": entry.created_at.isoformat(),
+        }
+        for entry in history
+    ]
+
+    return {
+        "success": True,
+        "incident_id": incident_id,
+        "timeline": timeline,
+    }
 
 @router.post("/{incident_id}/approval")
 def approve_incident(

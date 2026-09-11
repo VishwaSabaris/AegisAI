@@ -28,8 +28,9 @@ def test_real_incident_lifecycle_end_to_end():
         POST /incidents/{incident_id}/approval
             -> approval
             -> real Kubernetes remediation
-            -> verification
-            -> NOT_RECOVERED for the intentionally broken service
+            -> rollout verification
+            -> stability verification
+            -> RECOVERED
 
     The test uses a unique incident payload and removes the
     persisted database record after completion.
@@ -164,11 +165,44 @@ def test_real_incident_lifecycle_end_to_end():
 
         approval_data = approval_response.json()
 
-        assert approval_data["success"] is False
-        assert approval_data["status"] == "NOT_RECOVERED"
+        assert approval_data["success"] is True
+        assert approval_data["status"] == "RECOVERED"
         assert approval_data["remediation_executed"] is True
         assert approval_data["recovery_status"] == (
-            "NOT_RECOVERED"
+            "RECOVERED"
+        )
+
+        execution = approval_data["execution"]
+
+        assert execution["success"] is True
+        assert execution["service"] == "payment-service"
+        assert execution["namespace"] == "aegis-demo"
+        assert execution["action"] == "restart_deployment"
+
+        verification = approval_data["verification"]
+
+        assert verification["success"] is True
+
+        verification_data = verification["data"]
+
+        assert verification_data["recovery_status"] == (
+            "RECOVERED"
+        )
+        assert verification_data["rollout_complete"] is True
+        assert verification_data["desired_replicas"] == 1
+        assert verification_data["updated_replicas"] == 1
+        assert verification_data["available_replicas"] == 1
+        assert verification_data["ready_replicas"] == 1
+
+        stability = verification_data["stability"]
+
+        assert stability["stable"] is True
+        assert stability["observed_seconds"] >= (
+            stability["required_seconds"]
+        )
+
+        assert (
+            stability["rollout_wait_seconds"] >= 0
         )
 
         # The approval endpoint uses its own database session.
@@ -189,11 +223,11 @@ def test_real_incident_lifecycle_end_to_end():
         )
 
         assert persisted_after.recovery_status == (
-            "NOT_RECOVERED"
+            "RECOVERED"
         )
 
         assert persisted_after.lifecycle_state == (
-            "FAILED"
+            "RECOVERED"
         )
 
         assert (
@@ -216,11 +250,23 @@ def test_real_incident_lifecycle_end_to_end():
         )
         assert (
             final_data["lifecycle"]["state"]
-            == "FAILED"
+            == "RECOVERED"
         )
         assert final_data["recovery_status"] == (
-            "NOT_RECOVERED"
+            "RECOVERED"
         )
+
+        print("\n" + "=" * 60)
+        print("REAL E2E INCIDENT LIFECYCLE PASSED")
+        print("=" * 60)
+        print(f"Incident ID: {incident_id}")
+        print("Analysis: completed")
+        print("Approval: approved")
+        print("Remediation: restart_deployment")
+        print("Rollout: completed")
+        print("Stability verification: passed")
+        print("Recovery: RECOVERED")
+        print("Persistence: verified")
 
     finally:
         if incident_id is not None:
@@ -230,3 +276,7 @@ def test_real_incident_lifecycle_end_to_end():
                 db.close()
         else:
             db.close()
+
+
+if __name__ == "__main__":
+    test_real_incident_lifecycle_end_to_end()

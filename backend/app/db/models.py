@@ -135,6 +135,41 @@ class IncidentRecord(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+class IncidentLifecycleHistory(Base):
+    __tablename__ = "incident_lifecycle_history"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    incident_id: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    from_state: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    to_state: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    message: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
