@@ -52,6 +52,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
+
           pip install \
             fastapi==0.141.1 \
             uvicorn==0.52.4 \
@@ -73,6 +74,29 @@ jobs:
             PyJWT==2.14.0 \
             pytest==9.1.1
 
+      - name: Initialize database
+        env:
+          AEGISAI_DATABASE_URL: postgresql+psycopg://aegisai:aegisai_dev_password@localhost:5432/aegisai
+        run: |
+          python - <<'PY'
+          import psycopg
+
+          connection = psycopg.connect(
+              "postgresql://aegisai:aegisai_dev_password@localhost:5432/aegisai"
+          )
+
+          try:
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      "CREATE EXTENSION IF NOT EXISTS vector;"
+                  )
+              connection.commit()
+          finally:
+              connection.close()
+          PY
+
+          python -m backend.app.db.init_db
+
       - name: Run backend tests
         env:
           AEGISAI_JWT_SECRET: ci-test-secret
@@ -80,5 +104,6 @@ jobs:
           AEGISAI_CELERY_BROKER_URL: redis://localhost:6379/0
           AEGISAI_CELERY_RESULT_BACKEND: redis://localhost:6379/1
           AEGISAI_OLLAMA_URL: http://localhost:11434/api/chat
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q backend/tests -m "not e2e"
+          python -m pytest -q backend/tests -m "not e2e"
