@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: aegisai-postgres-compose
+
+    environment:
+      POSTGRES_USER: aegisai
+      POSTGRES_PASSWORD: aegisai_dev_password
+      POSTGRES_DB: aegisai
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - aegisai_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegisai -d aegisai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegisai-redis-compose
+
+    volumes:
+      - aegisai_redis_data:/data
+
+    command: redis-server --appendonly yes
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: aegisai-backend-compose
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    ports:
+      - "8000:8000"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      AEGISAI_JWT_SECRET: docker-test-secret-not-for-production
+      AEGISAI_DATABASE_URL: postgresql+psycopg://aegisai:aegisai_dev_password@postgres:5432/aegisai
+      AEGISAI_CELERY_BROKER_URL: redis://redis:6379/0
+      AEGISAI_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      AEGISAI_OLLAMA_URL: http://host.docker.internal:11434/api/chat
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: aegisai-celery-worker
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      AEGISAI_JWT_SECRET: docker-test-secret-not-for-production
+      AEGISAI_DATABASE_URL: postgresql+psycopg://aegisai:aegisai_dev_password@postgres:5432/aegisai
+      AEGISAI_CELERY_BROKER_URL: redis://redis:6379/0
+      AEGISAI_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      AEGISAI_OLLAMA_URL: http://host.docker.internal:11434/api/chat
+
+    command:
+      [
+        "celery",
+        "-A",
+        "backend.app.celery_app:celery_app",
+        "worker",
+        "--loglevel=info"
+      ]
+
+volumes:
+  aegisai_postgres_data:
+    external: true
+    name: aegisai_postgres_data
+
+  aegisai_redis_data:
+    external: true
+    name: aegisai_aegisai_redis_data

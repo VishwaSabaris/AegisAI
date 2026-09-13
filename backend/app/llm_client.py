@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -14,7 +15,11 @@ from backend.app.models.incident import (
 )
 
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = os.getenv(
+    "AEGISAI_OLLAMA_URL",
+    "http://localhost:11434/api/chat",
+)
+
 MODEL_NAME = "gemma3:4b-it-q4_K_M"
 
 RAG_TOP_K = 3

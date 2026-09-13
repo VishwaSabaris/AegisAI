@@ -1,10 +1,69 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
+
+
+class UserRecord(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    username: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="viewer",
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class IncidentRecord(Base):
@@ -25,7 +84,6 @@ class IncidentRecord(Base):
 
     grafana_fingerprint: Mapped[str | None] = mapped_column(
         String(255),
-        unique=True,
         nullable=True,
         index=True,
     )
@@ -39,6 +97,7 @@ class IncidentRecord(Base):
     namespace: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
+        default="default",
     )
 
     environment: Mapped[str] = mapped_column(
@@ -125,15 +184,16 @@ class IncidentRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        onupdate=func.now(),
     )
+
 
 class IncidentLifecycleHistory(Base):
     __tablename__ = "incident_lifecycle_history"
@@ -168,8 +228,9 @@ class IncidentLifecycleHistory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
     )
+
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
@@ -183,11 +244,10 @@ class KnowledgeChunk(Base):
     source: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
-        index=True,
     )
 
     title: Mapped[str] = mapped_column(
-        String(255),
+        String(500),
         nullable=False,
     )
 
@@ -196,20 +256,20 @@ class KnowledgeChunk(Base):
         nullable=False,
     )
 
-    embedding: Mapped[list[float]] = mapped_column(
+    embedding: Mapped[list[float] | None] = mapped_column(
         Vector(384),
-        nullable=False,
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        onupdate=func.now(),
     )

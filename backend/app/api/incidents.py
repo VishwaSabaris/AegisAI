@@ -1,10 +1,11 @@
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
+from backend.app.db.models import UserRecord
 from backend.app.models.dashboard import (
     DashboardSummaryResponse,
     IncidentTrendResponse,
@@ -13,6 +14,10 @@ from backend.app.models.incident import Incident
 from backend.app.models.remediation import RemediationApproval
 from backend.app.repositories.incident_repository import (
     IncidentRepository,
+)
+from backend.app.security.rbac import (
+    require_operator,
+    require_viewer,
 )
 from backend.app.services.orchestrator import IncidentOrchestrator
 
@@ -36,7 +41,6 @@ class CreateIncidentRequest(BaseModel):
 
 class ApprovalRequest(BaseModel):
     approved: bool
-    approved_by: str | None = None
     comment: str | None = None
 
 
@@ -49,6 +53,10 @@ _orchestrator = IncidentOrchestrator()
 )
 def create_incident(
     request: CreateIncidentRequest,
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_operator),
+    ],
 ) -> dict[str, Any]:
     """
     Create and process a new incident.
@@ -56,6 +64,8 @@ def create_incident(
     Incident investigation, AI analysis, risk evaluation,
     lifecycle transitions, and persistence are handled by
     the orchestrator.
+
+    Requires operator or admin role.
     """
 
     incident = Incident(
@@ -113,12 +123,18 @@ def list_incidents(
         description="Filter incidents by lifecycle state.",
     ),
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_viewer),
+    ] = None,
 ) -> dict[str, Any]:
     """
     Return persisted incidents using database-level
     pagination and optional filters.
 
     Results are returned newest first.
+
+    Requires viewer, operator, or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -192,10 +208,16 @@ def list_incidents(
 )
 def get_dashboard_summary(
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_viewer),
+    ] = None,
 ) -> DashboardSummaryResponse:
     """
     Return aggregate incident statistics for the
     AegisAI dashboard.
+
+    Requires viewer, operator, or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -223,10 +245,16 @@ def get_incident_trend(
         ),
     ),
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_viewer),
+    ] = None,
 ) -> IncidentTrendResponse:
     """
     Return daily incident counts for the requested
     number of calendar days.
+
+    Requires viewer, operator, or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -248,10 +276,16 @@ def get_incident_trend(
 def get_incident(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_viewer),
+    ] = None,
 ) -> dict[str, Any]:
     """
     Return a persisted incident together with its
     current lifecycle and available workflow state.
+
+    Requires viewer, operator, or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -302,16 +336,23 @@ def get_incident(
         "updated_at": record.updated_at.isoformat(),
     }
 
+
 @router.get("/{incident_id}/timeline")
 def get_incident_timeline(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_viewer),
+    ] = None,
 ) -> dict[str, Any]:
     """
     Return the persisted lifecycle timeline for an incident.
 
     Timeline entries represent actual lifecycle transitions
     recorded in PostgreSQL.
+
+    Requires viewer, operator, or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -348,17 +389,27 @@ def get_incident_timeline(
         "timeline": timeline,
     }
 
+
 @router.post("/{incident_id}/approval")
 def approve_incident(
     incident_id: str,
     request: ApprovalRequest,
     db: Session = Depends(get_db),
+    current_user: Annotated[
+        UserRecord,
+        Depends(require_operator),
+    ] = None,
 ) -> dict[str, Any]:
     """
     Approve or reject a pending remediation.
 
+    The approver identity is derived from the
+    authenticated user rather than the request body.
+
     The previously generated analysis and remediation
     request are reused. The incident is not re-analyzed.
+
+    Requires operator or admin role.
     """
 
     repository = IncidentRepository(db)
@@ -377,7 +428,7 @@ def approve_incident(
 
     approval = RemediationApproval(
         approved=request.approved,
-        approved_by=request.approved_by,
+        approved_by=current_user.username,
         comment=request.comment,
     )
 

@@ -1,12 +1,25 @@
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from backend.app.api.incidents import _orchestrator
 from backend.app.main import app
+from backend.app.security.jwt import create_access_token
 
 
 client = TestClient(app)
+
+
+def get_auth_headers() -> dict[str, str]:
+    token = create_access_token(
+        subject="1",
+        role="admin",
+    )
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
 
 
 def test_health_check():
@@ -47,6 +60,7 @@ def test_create_incident(
 
     response = client.post(
         "/incidents",
+        headers=get_auth_headers(),
         json={
             "service": "payment-service",
             "namespace": "aegis-demo",
@@ -83,7 +97,10 @@ def test_list_incidents():
         "backend.app.api.incidents.IncidentRepository",
         return_value=fake_repository,
     ):
-        response = client.get("/incidents")
+        response = client.get(
+            "/incidents",
+            headers=get_auth_headers(),
+        )
 
     assert response.status_code == 200
 
@@ -129,8 +146,6 @@ def test_list_incidents_with_pagination_and_filters():
     fake_record.approval_status = "PENDING"
     fake_record.recovery_status = None
 
-    from datetime import datetime, timezone
-
     fake_record.created_at = datetime(
         2026,
         9,
@@ -167,7 +182,8 @@ def test_list_incidents_with_pagination_and_filters():
             "&page_size=20"
             "&service=payment-service"
             "&namespace=aegis-demo"
-            "&lifecycle_state=AWAITING_APPROVAL"
+            "&lifecycle_state=AWAITING_APPROVAL",
+            headers=get_auth_headers(),
         )
 
     assert response.status_code == 200
@@ -251,7 +267,8 @@ def test_dashboard_summary():
         return_value=fake_repository,
     ):
         response = client.get(
-            "/incidents/dashboard/summary"
+            "/incidents/dashboard/summary",
+            headers=get_auth_headers(),
         )
 
     assert response.status_code == 200
@@ -300,7 +317,8 @@ def test_dashboard_summary_route_is_not_treated_as_incident_id():
         return_value=fake_repository,
     ):
         response = client.get(
-            "/incidents/dashboard/summary"
+            "/incidents/dashboard/summary",
+            headers=get_auth_headers(),
         )
 
     assert response.status_code == 200
@@ -309,7 +327,8 @@ def test_dashboard_summary_route_is_not_treated_as_incident_id():
 
 def test_list_incidents_invalid_page():
     response = client.get(
-        "/incidents?page=0"
+        "/incidents?page=0",
+        headers=get_auth_headers(),
     )
 
     assert response.status_code == 422
@@ -317,7 +336,8 @@ def test_list_incidents_invalid_page():
 
 def test_list_incidents_invalid_page_size():
     response = client.get(
-        "/incidents?page_size=101"
+        "/incidents?page_size=101",
+        headers=get_auth_headers(),
     )
 
     assert response.status_code == 422
@@ -332,7 +352,8 @@ def test_get_incident_not_found():
         return_value=fake_repository,
     ):
         response = client.get(
-            "/incidents/non-existent-id"
+            "/incidents/non-existent-id",
+            headers=get_auth_headers(),
         )
 
     assert response.status_code == 404
@@ -349,6 +370,7 @@ def test_approval_incident_not_found():
     ):
         response = client.post(
             "/incidents/non-existent-id/approval",
+            headers=get_auth_headers(),
             json={
                 "approved": True,
                 "approved_by": "test-user",
@@ -382,6 +404,7 @@ def test_approval_invalid_state_returns_409():
     ):
         response = client.post(
             "/incidents/test-incident/approval",
+            headers=get_auth_headers(),
             json={
                 "approved": True,
                 "approved_by": "test-user",
@@ -419,6 +442,7 @@ def test_approval_success():
     ):
         response = client.post(
             "/incidents/test-incident/approval",
+            headers=get_auth_headers(),
             json={
                 "approved": True,
                 "approved_by": "test-user",
@@ -429,10 +453,57 @@ def test_approval_success():
     assert response.status_code == 200
     assert response.json() == expected_result
 
+def test_approval_uses_authenticated_user_as_approver():
+    fake_record = MagicMock()
+
+    fake_repository = MagicMock()
+    fake_repository.get_by_incident_id.return_value = fake_record
+    fake_repository.to_incident.return_value = MagicMock()
+
+    expected_result = {
+        "success": True,
+        "status": "RECOVERED",
+        "remediation_executed": True,
+        "recovery_status": "RECOVERED",
+    }
+
+    with (
+        patch(
+            "backend.app.api.incidents.IncidentRepository",
+            return_value=fake_repository,
+        ),
+        patch.object(
+            _orchestrator,
+            "approve_and_execute",
+            return_value=expected_result,
+        ) as mock_approve_and_execute,
+    ):
+        response = client.post(
+            "/incidents/test-incident/approval",
+            headers=get_auth_headers(),
+            json={
+                "approved": True,
+                "approved_by": "attacker",
+                "comment": "Approved",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected_result
+
+    approval_argument = (
+        mock_approve_and_execute.call_args.kwargs["approval"]
+    )
+
+    assert approval_argument.approved is True
+    assert approval_argument.approved_by == "testadmin"
+    assert approval_argument.approved_by != "attacker"
+    assert approval_argument.comment == "Approved"
 
 def test_create_incident_validation():
     response = client.post(
         "/incidents",
+        headers=get_auth_headers(),
         json={
             "service": "",
             "namespace": "aegis-demo",
@@ -472,6 +543,7 @@ def test_approval_request_accepts_optional_fields():
     ):
         response = client.post(
             "/incidents/test-incident/approval",
+            headers=get_auth_headers(),
             json={
                 "approved": False,
             },

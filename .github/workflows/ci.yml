@@ -1,0 +1,84 @@
+name: AegisAI CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: aegisai
+          POSTGRES_PASSWORD: aegisai_dev_password
+          POSTGRES_DB: aegisai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegisai -d aegisai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 10s
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            fastapi==0.141.1 \
+            uvicorn==0.52.4 \
+            pydantic==2.13.5 \
+            SQLAlchemy==2.0.52 \
+            psycopg==3.3.5 \
+            kubernetes==36.0.3 \
+            pgvector==0.5.0 \
+            python-dotenv==1.2.3 \
+            celery==5.6.3 \
+            redis==6.4.0 \
+            prometheus-client==0.26.0 \
+            sentence-transformers==6.0.1 \
+            torch==2.14.0 \
+            transformers==5.16.1 \
+            requests==2.34.2 \
+            websocket-client==1.9.2 \
+            pwdlib==0.3.1 \
+            PyJWT==2.14.0 \
+            pytest==9.1.1
+
+      - name: Run backend tests
+        env:
+          AEGISAI_JWT_SECRET: ci-test-secret
+          AEGISAI_DATABASE_URL: postgresql+psycopg://aegisai:aegisai_dev_password@localhost:5432/aegisai
+          AEGISAI_CELERY_BROKER_URL: redis://localhost:6379/0
+          AEGISAI_CELERY_RESULT_BACKEND: redis://localhost:6379/1
+          AEGISAI_OLLAMA_URL: http://localhost:11434/api/chat
+        run: |
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q backend/tests -m "not e2e"

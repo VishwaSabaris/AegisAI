@@ -1,13 +1,19 @@
+import os
 from collections.abc import Generator
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
-DATABASE_URL = (
+load_dotenv()
+
+
+DATABASE_URL = os.getenv(
+    "AEGISAI_DATABASE_URL",
     "postgresql+psycopg://"
     "aegisai:aegisai_dev_password@"
-    "localhost:5432/aegisai"
+    "localhost:5432/aegisai",
 )
 
 

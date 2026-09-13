@@ -4,7 +4,6 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Header,
     HTTPException,
     status,
@@ -16,6 +15,9 @@ from backend.app.repositories.incident_repository import (
     IncidentRepository,
 )
 from backend.app.services.orchestrator import IncidentOrchestrator
+from backend.app.tasks import (
+    process_grafana_incident_task,
+)
 
 load_dotenv()
 
@@ -27,77 +29,12 @@ router = APIRouter(
 _orchestrator = IncidentOrchestrator()
 
 
-def _process_grafana_incident(
-    incident: Incident,
-    grafana_fingerprint: str | None,
-) -> None:
-    """
-    Process a Grafana incident in the FastAPI background task.
-
-    The webhook itself only registers the incident as DETECTED.
-    The expensive investigation, LLM inference, analysis, and
-    approval workflow run after the HTTP response has been sent.
-
-    If unexpected processing fails, the incident lifecycle is
-    explicitly persisted as FAILED so it cannot remain stuck
-    indefinitely in an intermediate state.
-    """
-
-    try:
-        _orchestrator.process_incident(
-            incident=incident,
-            grafana_fingerprint=grafana_fingerprint,
-        )
-
-    except Exception as error:
-        print(
-            "Error while processing Grafana incident "
-            f"{incident.incident_id}: {error}"
-        )
-
-        # -----------------------------------------------------
-        # Persist unexpected background-processing failure
-        # -----------------------------------------------------
-
-        try:
-            lifecycle = _orchestrator.get_lifecycle(
-                incident.incident_id
-            )
-
-            lifecycle.transition(
-                "FAILED",
-                message=(
-                    "Unexpected error occurred while "
-                    "processing the incident in the background."
-                ),
-            )
-
-            _orchestrator._persist_incident(
-                incident=incident,
-                lifecycle=lifecycle,
-                recovery_status="NOT_RECOVERED",
-            )
-
-            print(
-                "Grafana incident marked as FAILED: "
-                f"{incident.incident_id}"
-            )
-
-        except Exception as failure_error:
-            print(
-                "Error while persisting FAILED state for "
-                f"Grafana incident {incident.incident_id}: "
-                f"{failure_error}"
-            )
-
-
 @router.post(
     "/grafana",
     status_code=status.HTTP_202_ACCEPTED,
 )
 def grafana_webhook(
     payload: dict[str, Any],
-    background_tasks: BackgroundTasks,
     x_aegisai_webhook_secret: str | None = Header(
         default=None,
     ),
@@ -111,13 +48,17 @@ def grafana_webhook(
     1. Grafana fingerprint matching.
     2. Active incident matching by service and namespace.
 
-    New incidents are persisted immediately as DETECTED and
-    expensive incident processing is scheduled as a background
-    task so Grafana does not have to wait for LLM inference.
+    New incidents are persisted immediately as DETECTED
+    and expensive incident processing is submitted to
+    Celery through Redis.
 
-    Infrastructure-changing remediation remains protected by
-    the existing deterministic risk policy and human approval
-    boundary.
+    The Celery worker reloads the incident from PostgreSQL
+    before processing, so the processing path does not
+    depend on FastAPI process memory.
+
+    Infrastructure-changing remediation remains protected
+    by the existing deterministic risk policy and human
+    approval boundary.
     """
 
     expected_secret = os.getenv(
@@ -285,12 +226,11 @@ def grafana_webhook(
         )
 
         # -----------------------------------------------------
-        # Schedule expensive processing in background
+        # Submit expensive processing to Celery
         # -----------------------------------------------------
 
-        background_tasks.add_task(
-            _process_grafana_incident,
-            incident,
+        task = process_grafana_incident_task.delay(
+            incident.incident_id,
             fingerprint or None,
         )
 
@@ -304,10 +244,11 @@ def grafana_webhook(
                 ),
                 "status": "accepted",
                 "lifecycle": lifecycle.model_dump(),
+                "task_id": task.id,
                 "message": (
                     "Grafana alert accepted. "
-                    "Incident processing scheduled "
-                    "in the background."
+                    "Incident processing submitted "
+                    "to Celery."
                 ),
             }
         )

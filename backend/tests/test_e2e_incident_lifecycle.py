@@ -1,4 +1,5 @@
 import uuid
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -7,11 +8,23 @@ from backend.app.main import app
 from backend.app.repositories.incident_repository import (
     IncidentRepository,
 )
+from backend.app.security.jwt import create_access_token
 
 
 client = TestClient(app)
 
 
+def get_auth_headers() -> dict[str, str]:
+    token = create_access_token(
+        subject="1",
+        role="admin",
+    )
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
+
+@pytest.mark.e2e
 def test_real_incident_lifecycle_end_to_end():
     """
     Exercise the real incident workflow through the API.
@@ -43,6 +56,7 @@ def test_real_incident_lifecycle_end_to_end():
     try:
         response = client.post(
             "/incidents",
+            headers=get_auth_headers(),
             json={
                 "service": "payment-service",
                 "namespace": "aegis-demo",
@@ -131,7 +145,8 @@ def test_real_incident_lifecycle_end_to_end():
         assert persisted.requires_approval is True
 
         get_response = client.get(
-            f"/incidents/{incident_id}"
+            f"/incidents/{incident_id}",
+            headers=get_auth_headers(),
         )
 
         assert get_response.status_code == 200
@@ -151,6 +166,7 @@ def test_real_incident_lifecycle_end_to_end():
 
         approval_response = client.post(
             f"/incidents/{incident_id}/approval",
+            headers=get_auth_headers(),
             json={
                 "approved": True,
                 "approved_by": "e2e-test",
@@ -236,7 +252,8 @@ def test_real_incident_lifecycle_end_to_end():
         )
 
         final_response = client.get(
-            f"/incidents/{incident_id}"
+            f"/incidents/{incident_id}",
+            headers=get_auth_headers(),
         )
 
         assert final_response.status_code == 200
