@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from backend.app.models.incident import Incident
 from backend.app.models.remediation import RemediationApproval
@@ -19,6 +20,7 @@ def create_incident() -> Incident:
     )
 
 
+@pytest.mark.e2e
 def test_rejected_approval() -> None:
     print("\n" + "=" * 60)
     print("TEST 1 - REJECTED APPROVAL")
@@ -73,6 +75,7 @@ def test_rejected_approval() -> None:
     print("Kubernetes remediation tool was never executed.")
 
 
+@pytest.mark.e2e
 def test_approved_remediation_recovery() -> None:
     print("\n" + "=" * 60)
     print("TEST 2 - APPROVED REMEDIATION")

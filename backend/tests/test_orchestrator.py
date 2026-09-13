@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from backend.app.models.incident import Incident
 from backend.app.services.orchestrator import IncidentOrchestrator
 
@@ -13,7 +15,7 @@ def create_incident() -> Incident:
         recent_log="Database connection refused on port 5432",
     )
 
-
+@pytest.mark.e2e
 def test_incident_orchestrator() -> None:
     print("=" * 60)
     print("AegisAI - Incident Orchestrator Test")

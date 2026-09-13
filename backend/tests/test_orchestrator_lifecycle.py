@@ -1,8 +1,10 @@
+import pytest
+
 from backend.app.models.incident import Incident
 from backend.app.models.remediation import RemediationApproval
 from backend.app.services.orchestrator import IncidentOrchestrator
 
-
+@pytest.mark.e2e
 def test_incident_lifecycle_integration():
     incident = Incident(
         service="payment-service",
@@ -52,7 +54,7 @@ def test_incident_lifecycle_integration():
         "\n5D lifecycle integration test passed."
     )
 
-
+@pytest.mark.e2e
 def test_rejected_approval_is_terminal():
     incident = Incident(
         service="payment-service",
@@ -98,7 +100,7 @@ def test_rejected_approval_is_terminal():
 
     print("\nRejected approval test passed.")
 
-
+@pytest.mark.e2e
 def test_approval_does_not_rerun_analysis(monkeypatch):
     incident = Incident(
         service="payment-service",
