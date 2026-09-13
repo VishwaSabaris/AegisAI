@@ -97,6 +97,36 @@ jobs:
 
           python -m backend.app.db.init_db
 
+      - name: Seed CI test user
+        env:
+          AEGISAI_DATABASE_URL: postgresql+psycopg://aegisai:aegisai_dev_password@localhost:5432/aegisai
+          AEGISAI_JWT_SECRET: ci-test-secret
+        run: |
+          python - <<'PY'
+          from backend.app.core.database import SessionLocal
+          from backend.app.db.models import UserRecord
+          from backend.app.security.password import hash_password
+
+          db = SessionLocal()
+
+          try:
+              user = UserRecord(
+                  id=1,
+                  username="testadmin",
+                  email="testadmin@aegisai.local",
+                  password_hash=hash_password("ci-test-password"),
+                  role="admin",
+                  is_active=True,
+              )
+
+              db.add(user)
+              db.commit()
+
+              print("CI test user created successfully.")
+          finally:
+              db.close()
+          PY
+
       - name: Run backend tests
         env:
           AEGISAI_JWT_SECRET: ci-test-secret
